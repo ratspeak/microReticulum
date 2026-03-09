@@ -186,6 +186,7 @@ namespace RNS {
 
 	// CBA For access to private static members by Transport class
 	friend class Transport;
+	friend class Identity;
 	};
 
 }
