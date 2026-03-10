@@ -823,7 +823,7 @@ Transport::DestinationEntry empty_destination_entry;
 		// are "behind" a shared instance, we need to get that instance
 		// to transport it onto the network.
         //elif Transport.destination_table[packet.destination_hash][2] == 1 and Transport.owner.is_connected_to_shared_instance:
-		else if (destination_entry._hops == 1 && (_owner.is_connected_to_shared_instance() || outbound_interface.needs_transport_headers())) {
+		else if (destination_entry._hops == 1 && _owner.is_connected_to_shared_instance()) {
 			TRACE("Transport::outbound: Sending packet for directly connected interface to shared instance...");
 			if (packet.header_type() == Type::Packet::HEADER_1) {
 				// Insert packet into transport

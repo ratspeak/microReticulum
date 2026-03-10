@@ -83,8 +83,6 @@ namespace RNS {
 		bool _is_connected_to_shared_instance = false;
 		bool _is_local_shared_instance = false;
 
-	public:
-		virtual bool needs_transport_headers() const { return _is_connected_to_shared_instance; }
 		//Bytes _hash;
 		HInterface _parent_interface;
 		//Transport& _owner;
@@ -158,7 +156,6 @@ namespace RNS {
 		inline void stop() { assert(_impl); return _impl->stop(); }
 		inline void loop() { assert(_impl); return _impl->loop(); }
 		inline const Bytes get_hash() const { assert(_impl); return _impl->get_hash(); }
-		inline bool needs_transport_headers() const { assert(_impl); return _impl->needs_transport_headers(); }
 		void process_announce_queue();
 
 		// CBA ACCUMULATES

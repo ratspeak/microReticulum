@@ -200,7 +200,10 @@ Can be used to load previously created and saved identities into Reticulum.
 		//p _known_destinations[destination_hash] = {OS::time(), packet_hash, public_key, app_data};
 		// CBA ACCUMULATES
 		try {
-			_known_destinations.insert({destination_hash, {OS::time(), packet_hash, public_key, app_data}});
+			// Use insert_or_assign so the timestamp is always refreshed.
+			// Plain insert() is a no-op for existing keys, leaving the old
+			// timestamp — cull then removes the "stale" entry we just validated.
+			_known_destinations.insert_or_assign(destination_hash, IdentityEntry{OS::time(), packet_hash, public_key, app_data});
 			// CBA IMMEDIATE CULL
 			cull_known_destinations();
 		}
