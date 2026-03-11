@@ -1985,10 +1985,12 @@ Transport::DestinationEntry empty_destination_entry;
 							new_announce.send();
 						}
 
-						// CBA Culling before adding to esnure table does not exceed maxsize
-						TRACEF("Caching packet %s", packet.get_hash().toHex().c_str());
-						if (RNS::Transport::cache_packet(packet, true)) {
-							packet.cached(true);
+						// Cache announce packets only for transport nodes (endpoints don't rebroadcast)
+						if (Reticulum::transport_enabled()) {
+							TRACEF("Caching packet %s", packet.get_hash().toHex().c_str());
+							if (RNS::Transport::cache_packet(packet, true)) {
+								packet.cached(true);
+							}
 						}
 						//TRACEF("Adding packet %s to packet table", packet.get_hash().toHex().c_str());
 						//PacketEntry packet_entry(packet);
