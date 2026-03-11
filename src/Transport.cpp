@@ -791,7 +791,7 @@ Transport::DestinationEntry empty_destination_entry;
 		// This rule applies both for "normal" transport, and when connected
 		// to a local shared Reticulum instance.
         //if Transport.destination_table[packet.destination_hash][2] > 1:
-		if (destination_entry._hops >= 1) {
+		if (destination_entry._hops > 1) {
 			TRACE("Forwarding packet to next closest interface...");
 			if (packet.header_type() == Type::Packet::HEADER_1) {
 				// Insert packet into transport
