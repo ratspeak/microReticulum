@@ -474,8 +474,31 @@ namespace RNS {
 
 namespace RNS { namespace Persistence {
 
+#if defined(BOARD_HAS_PSRAM) && defined(ESP32)
+	// PSRAM allocator for ArduinoJson — prevents deserialization failures
+	// under heap pressure (heap can be <1KB free while PSRAM has 8+ MB).
+	class PsramAllocator : public ArduinoJson::Allocator {
+	public:
+		void* allocate(size_t size) override {
+			void* p = ps_malloc(size);
+			if (!p) p = malloc(size);  // fallback to heap if PSRAM unavailable
+			return p;
+		}
+		void deallocate(void* ptr) override {
+			free(ptr);  // free() handles both heap and PSRAM on ESP32
+		}
+		void* reallocate(void* ptr, size_t new_size) override {
+			void* p = ps_realloc(ptr, new_size);
+			if (!p) p = realloc(ptr, new_size);  // fallback
+			return p;
+		}
+	};
+	static PsramAllocator _psramAllocator;
+	static JsonDocument _document(&_psramAllocator);
+#else
 	//static DynamicJsonDocument _document(Type::Persistence::DOCUMENT_MAXSIZE);
 	static JsonDocument _document;
+#endif
 	static Bytes _buffer(Type::Persistence::BUFFER_MAXSIZE);
 
 	template <typename T> uint32_t crc(const T& obj) {

@@ -2683,11 +2683,10 @@ Deregisters an announce handler.
 	auto iter = _path_table.find(destination_hash);
 	if (iter == _path_table.end()) return empty_destination_entry;
 	DestinationEntry& destination_entry = (*iter).second;
-	if (!destination_entry.announce_packet()) {
-		DEBUGF("Entry for destination %s found but is missing announce packet, discarding", destination_hash.toHex().c_str());
-		remove_path(destination_hash);
-		return empty_destination_entry;
-	}
+	// Don't require announce_packet for basic routing — it's only needed for
+	// path response forwarding. The routing fields (_received_from, _hops,
+	// receiving_interface) are valid without it, and removing the path here
+	// when deserialization fails under memory pressure breaks TCP outbound.
 	if (!destination_entry.receiving_interface()) {
 		DEBUGF("Entry for destination %s found but is missing receiving interface, discarding", destination_hash.toHex().c_str());
 		remove_path(destination_hash);
@@ -2725,13 +2724,14 @@ Deregisters an announce handler.
 :returns: The number of hops to the specified destination, or ``RNS.Transport.PATHFINDER_M`` if the number of hops is unknown.
 */
 /*static*/ uint8_t Transport::hops_to(const Bytes& destination_hash) {
-	auto& destination_entry = get_path(destination_hash);
-	if (destination_entry) {
-		return destination_entry._hops;
+	// Direct path table lookup — avoids get_path() which triggers
+	// expensive announce_packet lazy load from flash cache.
+	// hops_to() only needs _hops which is already in memory.
+	auto iter = _path_table.find(destination_hash);
+	if (iter != _path_table.end()) {
+		return (*iter).second._hops;
 	}
-	else {
-		return PATHFINDER_M;
-	}
+	return PATHFINDER_M;
 }
 
 /*
@@ -3049,6 +3049,10 @@ will announce it.
 	else if ((Reticulum::transport_enabled() || is_from_local_client) && destination_entry) {
 		TRACEF("Transport::path_request_handler: entry found for destination %s", destination_hash.toHex().c_str());
 		const Packet announce_packet = destination_entry.announce_packet();
+		if (!announce_packet) {
+			DEBUGF("Path entry for %s exists but announce packet unavailable (cache miss), cannot answer path request", destination_hash.toHex().c_str());
+		}
+		else {
 TRACEF("announce_packet destination_hash: %s", announce_packet.destination_hash().toHex().c_str());
 TRACEF("announce_packet hops: %u", announce_packet.hops());
 TRACEF("announce_packet str: %s", announce_packet.toString().c_str());
@@ -3135,6 +3139,7 @@ TRACEF("announce_packet str: %s", announce_packet.toString().c_str());
 				cull_announce_table();
 			}
 		}
+		} // else (announce_packet valid)
 	}
 	else if (is_from_local_client) {
 		// Forward path request on all interfaces
