@@ -101,15 +101,23 @@ Destination::Destination(const Identity& identity, const Type::Destination::dire
 /*static*/ Bytes Destination::hash(const Identity& identity, const char* app_name, const char* aspects) {
 	//p name_hash = Identity::full_hash(Destination.expand_name(None, app_name, *aspects).encode("utf-8"))[:(RNS.Identity.NAME_HASH_LENGTH//8)]
 	//p addr_hash_material = name_hash
+	std::string expanded = expand_name({Type::NONE}, app_name, aspects);
 	Bytes addr_hash_material = name_hash(app_name, aspects);
+	TRACEF("[DIAG] Dest::hash: expanded='%s' name_hash=%s",
+		expanded.c_str(), addr_hash_material.toHex().c_str());
 	if (identity) {
+		TRACEF("[DIAG] Dest::hash: identity_hash=%s", identity.hash().toHex().c_str());
 		addr_hash_material << identity.hash();
 	}
+	TRACEF("[DIAG] Dest::hash: material(%d)=%s",
+		(int)addr_hash_material.size(), addr_hash_material.toHex().c_str());
 
     //p return RNS.Identity.full_hash(addr_hash_material)[:RNS.Reticulum.TRUNCATED_HASHLENGTH//8]
 	// CBA TODO valid alternative?
 	//return Identity::full_hash(addr_hash_material).left(Type::Reticulum::TRUNCATED_HASHLENGTH/8);
-	return Identity::truncated_hash(addr_hash_material);
+	Bytes result = Identity::truncated_hash(addr_hash_material);
+	TRACEF("[DIAG] Dest::hash: result=%s", result.toHex().c_str());
+	return result;
 }
 
 /*
@@ -253,9 +261,17 @@ Packet Destination::announce(const Bytes& app_data, bool path_response, const In
 		}
 		else {
 			Bytes destination_hash = _object->_hash;
-			//p random_hash = Identity::get_random_hash()[0:5] << int(time.time()).to_bytes(5, "big")
-			// CBA TODO add in time to random hash
-			Bytes random_hash = Cryptography::random(Type::Identity::RANDOM_HASH_LENGTH/8);
+			//p random_hash = Identity::get_random_hash()[0:5] + int(time.time()).to_bytes(5, "big")
+			// 5 random bytes + 5 big-endian timestamp bytes (matches Python reference)
+			Bytes random_part = Cryptography::random(5);
+			uint64_t ts = (uint64_t)OS::time();
+			uint8_t time_bytes[5];
+			time_bytes[0] = (ts >> 32) & 0xFF;
+			time_bytes[1] = (ts >> 24) & 0xFF;
+			time_bytes[2] = (ts >> 16) & 0xFF;
+			time_bytes[3] = (ts >> 8)  & 0xFF;
+			time_bytes[4] = ts & 0xFF;
+			Bytes random_hash = random_part + Bytes(time_bytes, 5);
 
 			Bytes new_app_data(app_data);
 			if (new_app_data.empty() && !_object->_default_app_data.empty()) {
@@ -431,7 +447,8 @@ Encrypts information for ``RNS.Destination.SINGLE`` or ``RNS.Destination.GROUP``
 	}
 
 	if (_object->_type == SINGLE && _object->_identity) {
-		return _object->_identity.encrypt(data);
+		Bytes ratchet = Identity::get_ratchet(_object->_hash);
+		return _object->_identity.encrypt(data, ratchet);
 	}
 
 // TODO

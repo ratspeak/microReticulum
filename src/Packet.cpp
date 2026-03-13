@@ -336,11 +336,12 @@ TRACEF("***** Link data: %s", _object->_ciphertext.toHex().c_str());
 					_object->_ciphertext = _object->_destination.encrypt(_object->_data);
 TRACEF("***** Destination Data: %s", _object->_ciphertext.toHex().c_str());
 				}
-				// CBA RATCHET
-				/*p TODO
-				if hasattr(self.destination, "latest_ratchet_id"):
-					self.ratchet_id = self.destination.latest_ratchet_id
-				*/
+				{
+					Bytes ratchet_pub = Identity::get_ratchet(_object->_destination.hash());
+					if (ratchet_pub) {
+						_object->_ratchet_id = Identity::full_hash(ratchet_pub).left(Type::Identity::NAME_HASH_LENGTH/8);
+					}
+				}
 				_object->_encrypted = true;
 			}
 		}
@@ -365,6 +366,15 @@ TRACEF("***** Destination Data: %s", _object->_ciphertext.toHex().c_str());
 
 	_object->_header << (uint8_t)_object->_context;
 	_object->_raw = _object->_header + _object->_ciphertext;
+
+	if (_object->_raw.size() >= 4 && _object->_packet_type == DATA) {
+		TRACEF("[DIAG] PACK: ht=%d tt=%d dt=%d pt=%d ctx=0x%02x flags=0x%02x raw=%dB [%02x %02x %02x %02x]",
+			_object->_header_type, _object->_transport_type, _object->_destination.type(),
+			_object->_packet_type, _object->_context, _object->_flags,
+			(int)_object->_raw.size(),
+			_object->_raw.data()[0], _object->_raw.data()[1],
+			_object->_raw.data()[2], _object->_raw.data()[3]);
+	}
 
 	if (_object->_raw.size() > _object->_MTU) {
 		throw std::length_error("Packet size of " + std::to_string(_object->_raw.size()) + " exceeds MTU of " + std::to_string(_object->_MTU) +" bytes");

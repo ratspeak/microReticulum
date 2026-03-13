@@ -31,13 +31,10 @@ namespace RNS { namespace Cryptography {
 			//DEBUGF("PKCS7::pad: len: %zu", len);
 			size_t padlen = bs - (len % bs);
 			//DEBUGF("PKCS7::pad: pad len: %zu", padlen);
-			// create zero-filled byte padding array of size padlen
+			// PKCS7: fill ALL padding bytes with padlen value (RFC 5652 §6.3)
 			//p v = bytes([padlen])
-			//uint8_t pad[padlen] = {0};
 			uint8_t pad[padlen];
-			memset(pad, 0, padlen);
-			// set last byte of padding array to size of padding
-			pad[padlen-1] = (uint8_t)padlen;
+			memset(pad, (uint8_t)padlen, padlen);
 			// concatenate data with padding
 			//p return data+v*padlen
 			data.append(pad, padlen);

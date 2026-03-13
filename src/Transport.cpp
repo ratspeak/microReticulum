@@ -782,6 +782,10 @@ Transport::DestinationEntry empty_destination_entry;
 	auto& destination_entry = get_path(packet.destination_hash());
 	if (packet.packet_type() != Type::Packet::ANNOUNCE && packet.destination().type() != Type::Destination::PLAIN && packet.destination().type() != Type::Destination::GROUP && destination_entry) {
 		TRACE("Transport::outbound: Path to destination is known");
+		TRACEF("[DIAG] OUTBOUND: path found dest=%.16s hops=%d rf=%.16s iface=%s",
+			packet.destination_hash().toHex().c_str(), destination_entry._hops,
+			destination_entry._received_from.toHex().c_str(),
+			destination_entry.receiving_interface().toString().c_str());
         //outbound_interface = Transport.destination_table[packet.destination_hash][5]
 		Interface outbound_interface = destination_entry.receiving_interface();
 
@@ -808,6 +812,8 @@ Transport::DestinationEntry empty_destination_entry;
 				new_raw << destination_entry._received_from;
 				//new_raw += packet.raw[2:]
 				new_raw << packet.raw().mid(2);
+				TRACEF("[DIAG] OUTBOUND: H1->H2 wrap (transport hops>1) flags=0x%02x ti=%.16s",
+					new_flags, destination_entry._received_from.toHex().c_str());
 				transmit(outbound_interface, new_raw);
 				//_path_table[packet.destination_hash][0] = time.time()
 				destination_entry._timestamp = OS::time();
@@ -852,6 +858,8 @@ Transport::DestinationEntry empty_destination_entry;
 		// simply transmit the packet directly on that one.
 		else {
 			TRACE("Transport::outbound: Sending packet over directly connected interface...");
+			TRACEF("[DIAG] OUTBOUND: direct H1 send flags=0x%02x size=%d dest=%.16s",
+				packet.flags(), (int)packet.raw().size(), packet.destination_hash().toHex().c_str());
 			transmit(outbound_interface, packet.raw());
 			sent = true;
 		}
@@ -862,6 +870,8 @@ Transport::DestinationEntry empty_destination_entry;
 	// interface, or belongs to a link.
 	else {
 		TRACE("Transport::outbound: Path to destination is unknown");
+		TRACEF("[DIAG] OUTBOUND: NO PATH for dest=%.16s, broadcasting H1",
+			packet.destination_hash().toHex().c_str());
 		bool stored_hash = false;
 		for (auto& [hash, interface] : _interfaces) {
 			TRACEF("Transport::outbound: Checking interface %s", interface.toString().c_str());
@@ -1985,12 +1995,11 @@ Transport::DestinationEntry empty_destination_entry;
 							new_announce.send();
 						}
 
-						// Cache announce packets only for transport nodes (endpoints don't rebroadcast)
-						if (Reticulum::transport_enabled()) {
-							TRACEF("Caching packet %s", packet.get_hash().toHex().c_str());
-							if (RNS::Transport::cache_packet(packet, true)) {
-								packet.cached(true);
-							}
+						// Cache announce packet for path persistence (all nodes, not just transport)
+						// Endpoints need cached announces so path table entries survive reboot
+						TRACEF("Caching packet %s", packet.get_hash().toHex().c_str());
+						if (RNS::Transport::cache_packet(packet, true)) {
+							packet.cached(true);
 						}
 						//TRACEF("Adding packet %s to packet table", packet.get_hash().toHex().c_str());
 						//PacketEntry packet_entry(packet);

@@ -28,6 +28,7 @@ using namespace RNS::Utilities;
 // CBA
 // CBA ACCUMULATES
 /*static*/ uint16_t Identity::_known_destinations_maxsize = RNS_KNOWN_DESTINATIONS_MAX;
+/*static*/ Identity::RatchetTable Identity::_known_ratchets;
 
 Identity::Identity(bool create_keys /*= true*/) : _object(new Object()) {
 	if (create_keys) {
@@ -478,27 +479,42 @@ Binary format for known_destinations persistence:
 	try {
 		if (packet.packet_type() == Type::Packet::ANNOUNCE) {
 			Bytes destination_hash = packet.destination_hash();
-			//TRACEF("Identity::validate_announce: destination_hash: %s", packet.destination_hash().toHex().c_str());
-			Bytes public_key = packet.data().left(KEYSIZE/8);
-			//TRACEF("Identity::validate_announce: public_key:       %s", public_key.toHex().c_str());
-			Bytes name_hash = packet.data().mid(KEYSIZE/8, NAME_HASH_LENGTH/8);
-			//TRACEF("Identity::validate_announce: name_hash:        %s", name_hash.toHex().c_str());
-			Bytes random_hash = packet.data().mid(KEYSIZE/8 + NAME_HASH_LENGTH/8, RANDOM_HASH_LENGTH/8);
-			//TRACEF("Identity::validate_announce: random_hash:      %s", random_hash.toHex().c_str());
-			Bytes signature = packet.data().mid(KEYSIZE/8 + NAME_HASH_LENGTH/8 + RANDOM_HASH_LENGTH/8, SIGLENGTH/8);
-			//TRACEF("Identity::validate_announce: signature:        %s", signature.toHex().c_str());
+
+			size_t keysize       = KEYSIZE/8;
+			size_t ratchetsize   = Type::Identity::RATCHETSIZE/8;
+			size_t name_hash_len = NAME_HASH_LENGTH/8;
+			size_t sig_len       = SIGLENGTH/8;
+
+			Bytes public_key = packet.data().left(keysize);
+			Bytes name_hash = packet.data().mid(keysize, name_hash_len);
+			Bytes random_hash = packet.data().mid(keysize + name_hash_len, 10);
+
+			Bytes ratchet;
+			Bytes signature;
 			Bytes app_data;
-			if (packet.data().size() > (KEYSIZE/8 + NAME_HASH_LENGTH/8 + RANDOM_HASH_LENGTH/8 + SIGLENGTH/8)) {
-				app_data = packet.data().mid(KEYSIZE/8 + NAME_HASH_LENGTH/8 + RANDOM_HASH_LENGTH/8 + SIGLENGTH/8);
+
+			// If the packet context flag is set, this announce contains a ratchet key
+			if (packet.context_flag() == Type::Packet::FLAG_SET) {
+				ratchet = packet.data().mid(keysize + name_hash_len + 10, ratchetsize);
+				signature = packet.data().mid(keysize + name_hash_len + 10 + ratchetsize, sig_len);
+				if (packet.data().size() > keysize + name_hash_len + 10 + ratchetsize + sig_len) {
+					app_data = packet.data().mid(keysize + name_hash_len + 10 + ratchetsize + sig_len);
+				}
 			}
-			//TRACEF("Identity::validate_announce: app_data:         %s", app_data.toHex().c_str());
-			//TRACEF("Identity::validate_announce: app_data text:    %s", app_data.toString().c_str());
+			else {
+				signature = packet.data().mid(keysize + name_hash_len + 10, sig_len);
+				if (packet.data().size() > keysize + name_hash_len + 10 + sig_len) {
+					app_data = packet.data().mid(keysize + name_hash_len + 10 + sig_len);
+				}
+			}
 
 			Bytes signed_data;
-			signed_data << packet.destination_hash() << public_key << name_hash << random_hash+app_data;
-			//TRACEF("Identity::validate_announce: signed_data:      %s", signed_data.toHex().c_str());
+			signed_data << destination_hash << public_key << name_hash << random_hash << ratchet << app_data;
 
-			if (packet.data().size() <= KEYSIZE/8 + NAME_HASH_LENGTH/8 + RANDOM_HASH_LENGTH/8 + SIGLENGTH/8) {
+			if (!ratchet && packet.data().size() <= keysize + name_hash_len + 10 + sig_len) {
+				app_data.clear();
+			}
+			else if (ratchet && packet.data().size() <= keysize + name_hash_len + 10 + ratchetsize + sig_len) {
 				app_data.clear();
 			}
 
@@ -506,8 +522,13 @@ Binary format for known_destinations persistence:
 			announced_identity.load_public_key(public_key);
 
 			if (announced_identity.pub() && announced_identity.validate(signature, signed_data)) {
+				TRACEF("[DIAG] validate_announce: name_hash=%s identity_hash=%s",
+					name_hash.toHex().c_str(), announced_identity.hash().toHex().c_str());
 				Bytes hash_material = name_hash << announced_identity.hash();
 				Bytes expected_hash = full_hash(hash_material).left(Type::Reticulum::TRUNCATED_HASHLENGTH/8);
+				TRACEF("[DIAG] validate_announce: material(%d)=%s expected=%s actual=%s",
+					(int)hash_material.size(), hash_material.toHex().c_str(),
+					expected_hash.toHex().c_str(), packet.destination_hash().toHex().c_str());
 				//TRACEF("Identity::validate_announce: destination_hash: %s", packet.destination_hash().toHex().c_str());
 				//TRACEF("Identity::validate_announce: expected_hash:    %s", expected_hash.toHex().c_str());
 
@@ -527,7 +548,10 @@ Binary format for known_destinations persistence:
 					}
 
 					remember(packet.get_hash(), packet.destination_hash(), public_key, app_data);
-					//p del announced_identity
+
+					if (ratchet) {
+						remember_ratchet(packet.destination_hash(), ratchet);
+					}
 
 					std::string signal_str;
 // TODO
@@ -552,14 +576,23 @@ Binary format for known_destinations persistence:
 						TRACEF("Valid announce for %s %d hops away, received on %s%s", packet.destination_hash().toHex().c_str(), packet.hops(), packet.receiving_interface().toString().c_str(), signal_str.c_str());
 					}
 
+					TRACEF("[DIAG] ANNOUNCE VALID: dest=%s hops=%d ratchet=%s",
+						packet.destination_hash().toHex().c_str(), packet.hops(),
+						ratchet ? "YES" : "NO");
+
 					return true;
 				}
 				else {
+					TRACEF("[DIAG] ANNOUNCE HASH MISMATCH: dest=%s expected=%s",
+						packet.destination_hash().toHex().c_str(), expected_hash.toHex().c_str());
 					DEBUGF("Received invalid announce for %s: Destination mismatch.", packet.destination_hash().toHex().c_str());
 					return false;
 				}
 			}
 			else {
+				TRACEF("[DIAG] ANNOUNCE INVALID SIG: dest=%s datalen=%d ctxflag=%d",
+					packet.destination_hash().toHex().c_str(), (int)packet.data().size(),
+					packet.context_flag());
 				DEBUGF("Received invalid announce for %s: Invalid signature.", packet.destination_hash().toHex().c_str());
 				//p del announced_identity
 				return false;
@@ -571,6 +604,27 @@ Binary format for known_destinations persistence:
 		return false;
 	}
 	return false;
+}
+
+/*static*/ void Identity::remember_ratchet(const Bytes& destination_hash, const Bytes& ratchet_pub) {
+	if (ratchet_pub.size() != Type::Identity::RATCHETSIZE/8) {
+		WARNINGF("Cannot remember ratchet for %s, invalid ratchet size %zu", destination_hash.toHex().c_str(), ratchet_pub.size());
+		return;
+	}
+	auto iter = _known_ratchets.find(destination_hash);
+	if (iter != _known_ratchets.end() && iter->second == ratchet_pub) {
+		return; // Already known, no change
+	}
+	TRACEF("Remembering ratchet for %s", destination_hash.toHex().c_str());
+	_known_ratchets.insert_or_assign(destination_hash, ratchet_pub);
+}
+
+/*static*/ Bytes Identity::get_ratchet(const Bytes& destination_hash) {
+	auto iter = _known_ratchets.find(destination_hash);
+	if (iter != _known_ratchets.end()) {
+		return iter->second;
+	}
+	return {Bytes::NONE};
 }
 
 /*static*/ void Identity::persist_data() {
@@ -590,7 +644,7 @@ Encrypts information for the identity.
 :returns: Ciphertext token as *bytes*.
 :raises: *KeyError* if the instance does not hold a public key.
 */
-const Bytes Identity::encrypt(const Bytes& plaintext) const {
+const Bytes Identity::encrypt(const Bytes& plaintext, const Bytes& ratchet_key /*= {Bytes::NONE}*/) const {
 	assert(_object);
 	TRACE("Identity::encrypt: encrypting data...");
 	if (!_object->_pub) {
@@ -600,9 +654,18 @@ const Bytes Identity::encrypt(const Bytes& plaintext) const {
 	Bytes ephemeral_pub_bytes = ephemeral_key->public_key()->public_bytes();
 	TRACEF("Identity::encrypt: ephemeral public key: %s", ephemeral_pub_bytes.toHex().c_str());
 
-	// CRYPTO: create shared key for key exchange using own public key
-	//shared_key = ephemeral_key.exchange(self.pub)
-	Bytes shared_key = ephemeral_key->exchange(_object->_pub_bytes);
+	// CRYPTO: create shared key for key exchange
+	// Use ratchet public key if available for forward secrecy, otherwise identity public key
+	Bytes shared_key;
+	TRACEF("[DIAG] ENCRYPT: ratchet=%s ephemeral=%.16s... plaintext=%dB",
+		ratchet_key ? "YES" : "NO", ephemeral_pub_bytes.toHex().c_str(), (int)plaintext.size());
+	if (ratchet_key) {
+		shared_key = ephemeral_key->exchange(ratchet_key);
+		TRACE("Identity::encrypt: using ratchet key for ECDH");
+	}
+	else {
+		shared_key = ephemeral_key->exchange(_object->_pub_bytes);
+	}
 	TRACEF("Identity::encrypt: shared key:           %s", shared_key.toHex().c_str());
 
 	Bytes derived_key = Cryptography::hkdf(

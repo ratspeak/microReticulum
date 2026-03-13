@@ -40,11 +40,14 @@ namespace RNS {
 		//using IdentityTable = std::map<Bytes, IdentityEntry>;
 		using IdentityTable = std::map<Bytes, IdentityEntry, std::less<Bytes>, Utilities::Memory::ContainerAllocator<std::pair<const Bytes, IdentityEntry>>>;
 
+		using RatchetTable = std::map<Bytes, Bytes>;
+
 	private:
 		static IdentityTable _known_destinations;
 		static bool _saving_known_destinations;
 		// CBA
 		static uint16_t _known_destinations_maxsize;
+		static RatchetTable _known_ratchets;
 
 	public:
 		Identity(bool create_keys = true);
@@ -101,7 +104,7 @@ namespace RNS {
 		inline const Bytes& get_salt() const { assert(_object); return _object->_hash; }
 		inline const Bytes get_context() const { return {Bytes::NONE}; }
 
-		const Bytes encrypt(const Bytes& plaintext) const;
+		const Bytes encrypt(const Bytes& plaintext, const Bytes& ratchet_key = {Bytes::NONE}) const;
 		const Bytes decrypt(const Bytes& ciphertext_token) const;
 		const Bytes sign(const Bytes& message) const;
 		bool validate(const Bytes& signature, const Bytes& message) const;
@@ -151,6 +154,8 @@ namespace RNS {
 		}
 
 		static bool validate_announce(const Packet& packet);
+		static void remember_ratchet(const Bytes& destination_hash, const Bytes& ratchet_pub);
+		static Bytes get_ratchet(const Bytes& destination_hash);
 		static void persist_data();
 		static void exit_handler();
 
