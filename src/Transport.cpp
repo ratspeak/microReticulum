@@ -1870,8 +1870,10 @@ Transport::DestinationEntry empty_destination_entry;
 								);
 								// CBA ACCUMULATES
 								_announce_table.insert({packet.destination_hash(), announce_entry});
-								// CBA IMMEDIATE CULL
-								cull_announce_table();
+								// Defer cull until 10% over capacity
+								if (_announce_table.size() > _announce_table_maxsize + (_announce_table_maxsize / 10)) {
+									cull_announce_table();
+								}
 							}
 						}
 						// TODO: Check from_local_client once and store result
@@ -1900,8 +1902,10 @@ Transport::DestinationEntry empty_destination_entry;
 								);
 								// CBA ACCUMULATES
 								_announce_table.insert({packet.destination_hash(), announce_entry});
-								// CBA IMMEDIATE CULL
-								cull_announce_table();
+								// Defer cull until 10% over capacity
+								if (_announce_table.size() > _announce_table_maxsize + (_announce_table_maxsize / 10)) {
+									cull_announce_table();
+								}
 							}
 						}
 
@@ -1995,11 +1999,13 @@ Transport::DestinationEntry empty_destination_entry;
 							new_announce.send();
 						}
 
-						// Cache announce packet for path persistence (all nodes, not just transport)
-						// Endpoints need cached announces so path table entries survive reboot
-						TRACEF("Caching packet %s", packet.get_hash().toHex().c_str());
-						if (RNS::Transport::cache_packet(packet, true)) {
-							packet.cached(true);
+						// Cache announce packet for path persistence (transport nodes only)
+						// Endpoints reconnect to TCP on reboot and get fresh announces
+						if (Reticulum::transport_enabled()) {
+							TRACEF("Caching packet %s", packet.get_hash().toHex().c_str());
+							if (RNS::Transport::cache_packet(packet, true)) {
+								packet.cached(true);
+							}
 						}
 						//TRACEF("Adding packet %s to packet table", packet.get_hash().toHex().c_str());
 						//PacketEntry packet_entry(packet);
@@ -2025,8 +2031,10 @@ Transport::DestinationEntry empty_destination_entry;
 							if (_path_table.insert({packet.destination_hash(), destination_table_entry}).second) {
 								TRACEF("Added destination %s to path table!", packet.destination_hash().toHex().c_str());
 								++_destinations_added;
-								// CBA IMMEDIATE CULL
-								cull_path_table();
+								// Defer cull until 10% over capacity
+								if (_path_table.size() > _path_table_maxsize + (_path_table_maxsize / 10)) {
+									cull_path_table();
+								}
 							}
 							else {
 								ERRORF("Failed to add destination %s to path table!", packet.destination_hash().toHex().c_str());
@@ -3765,31 +3773,34 @@ TRACEF("Transport::write_path_table: buffer size %zu bytes", Persistence::_buffe
 
 	TRACE("Transport::clean_caches()");
 #if defined(RNS_USE_FS) && defined(RNS_PERSIST_PATHS)
-	// CBA Remove cached packets no longer in path list
-	std::list<std::string> remove_list;
-	OS::list_directory(Reticulum::_cachepath, [&remove_list](const char* file_name) {
-		TRACEF("Transport::clean_caches: Checking for use of cached packet %s", file_name);
-		bool found = false;
-		for (auto& [destination_hash, destination_entry] : _path_table) {
-			if (strcasecmp(file_name, destination_entry.announce_packet_hash().toHex().c_str()) == 0) {
-				found = true;
-				break;
-			}
+	// Endpoints don't cache announce packets — just wipe any stale files
+	if (!Reticulum::transport_enabled()) {
+		OS::list_directory(Reticulum::_cachepath, [](const char* file_name) {
+			char packet_cache_path[Type::Reticulum::FILEPATH_MAXSIZE];
+			snprintf(packet_cache_path, Type::Reticulum::FILEPATH_MAXSIZE, "%s/%s", Reticulum::_cachepath, file_name);
+			OS::remove_file(packet_cache_path);
+			OS::run_loop();
+		});
+		cleaning_caches = false;
+		return;
+	}
+
+	// Transport nodes: build hash set from path table for O(1) lookups
+	std::set<std::string> valid_hashes;
+	for (auto& [destination_hash, destination_entry] : _path_table) {
+		valid_hashes.insert(destination_entry.announce_packet_hash().toHex());
+	}
+
+	// Remove cached packets no longer referenced by any path
+	OS::list_directory(Reticulum::_cachepath, [&valid_hashes](const char* file_name) {
+		if (valid_hashes.find(file_name) == valid_hashes.end()) {
+			TRACEF("Transport::clean_caches: No matching path found, removing cached packet %s", file_name);
+			char packet_cache_path[Type::Reticulum::FILEPATH_MAXSIZE];
+			snprintf(packet_cache_path, Type::Reticulum::FILEPATH_MAXSIZE, "%s/%s", Reticulum::_cachepath, file_name);
+			OS::remove_file(packet_cache_path);
 		}
-		if (!found) {
-			remove_list.push_back(file_name);
-		}
-		//OS::reset_watchdog();
 		OS::run_loop();
 	});
-    for (auto& file_name : remove_list) {
-		TRACEF("Transport::clean_caches: No matching path found, removing cached packet %s", file_name.c_str());
-		char packet_cache_path[Type::Reticulum::FILEPATH_MAXSIZE];
-		snprintf(packet_cache_path, Type::Reticulum::FILEPATH_MAXSIZE, "%s/%s", Reticulum::_cachepath, file_name.c_str());
-		OS::remove_file(packet_cache_path);
-		//OS::reset_watchdog();
-		OS::run_loop();
-	}
 #endif
 
 	cleaning_caches = false;
