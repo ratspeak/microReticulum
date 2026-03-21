@@ -420,6 +420,39 @@ Binary format for known_destinations persistence:
 			}
 		}
 
+		// Normalize timestamps to current boot epoch.
+		// OS::time() on Arduino returns seconds since boot, not epoch time.
+		// Persisted entries carry timestamps from the previous boot session
+		// (e.g., 5000.0 = device had been up 5000s when saved). On a fresh
+		// boot at uptime 30s, a new announce would get timestamp 30.0 — which
+		// the LRU cull considers "older" than the persisted 5000.0, causing
+		// the NEW entry to be culled immediately. Fix: remap all loaded
+		// timestamps into [1.0, now-1] preserving their relative order, so
+		// any fresh announce at OS::time() is always "newest".
+		if (loaded > 0) {
+			double now = OS::time();
+			double max_ts = 0, min_ts = 1e18;
+			for (const auto& [key, entry] : _known_destinations) {
+				if (entry._timestamp > max_ts) max_ts = entry._timestamp;
+				if (entry._timestamp < min_ts) min_ts = entry._timestamp;
+			}
+			double range = max_ts - min_ts;
+			// Map [min_ts, max_ts] → [1.0, now - 1.0]
+			// All loaded entries end up before "now", preserving relative order
+			double target_max = (now > 2.0) ? now - 1.0 : 1.0;
+			double target_min = 1.0;
+			for (auto& [key, entry] : _known_destinations) {
+				if (range > 0.001) {
+					double normalized = (entry._timestamp - min_ts) / range;
+					entry._timestamp = target_min + normalized * (target_max - target_min);
+				} else {
+					entry._timestamp = target_min;
+				}
+			}
+			VERBOSEF("Normalized %zu destination timestamps: [%.1f,%.1f] -> [%.1f,%.1f]",
+				loaded, min_ts, max_ts, target_min, target_max);
+		}
+
 		cull_known_destinations();
 		VERBOSEF("Loaded %zu known destinations from storage", loaded);
 	}
