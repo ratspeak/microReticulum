@@ -281,6 +281,16 @@ void Link::prove() {
 	const Bytes signature(_object->_owner.identity().sign(signed_data));
 
 	Bytes proof_data = signature + _object->_pub_bytes + signalling_bytes;
+
+	// Diagnostic: dump proof components for cross-implementation debugging
+	VERBOSEF("[LINK-PROOF] link_id:     %s", _object->_link_id.toHex().c_str());
+	VERBOSEF("[LINK-PROOF] pub_bytes:   %s", _object->_pub_bytes.toHex().c_str());
+	VERBOSEF("[LINK-PROOF] sig_pub:     %s", _object->_sig_pub_bytes.toHex().c_str());
+	VERBOSEF("[LINK-PROOF] signalling:  %s (mtu=%d mode=%d)", signalling_bytes.toHex().c_str(), _object->_mtu, _object->_mode);
+	VERBOSEF("[LINK-PROOF] signed_data: %s (%d bytes)", signed_data.toHex().c_str(), (int)signed_data.size());
+	VERBOSEF("[LINK-PROOF] signature:   %s", signature.toHex().c_str());
+	VERBOSEF("[LINK-PROOF] proof_data:  %d bytes", (int)proof_data.size());
+
 	// CBA LINK
 	// CBA TODO: Determine which approach is better, passing liunk to packet or passing _link_destination
 	Packet proof(*this, proof_data, Type::Packet::PROOF, Type::Packet::LRPROOF);
@@ -1014,6 +1024,7 @@ void Link::receive(const Packet& packet) {
 			}
 
 			if (packet.packet_type() == Type::Packet::DATA) {
+				VERBOSEF("[LINK-RX] context=0x%02X status=%d initiator=%d", (int)packet.context(), (int)_object->_status, _object->_initiator);
 				bool should_query = false;
 				switch (packet.context()) {
 				case Type::Packet::CONTEXT_NONE:
