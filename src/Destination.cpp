@@ -447,8 +447,11 @@ Encrypts information for ``RNS.Destination.SINGLE`` or ``RNS.Destination.GROUP``
 	}
 
 	if (_object->_type == SINGLE && _object->_identity) {
-		Bytes ratchet = Identity::get_ratchet(_object->_hash);
-		return _object->_identity.encrypt(data, ratchet);
+		// TODO: Re-enable ratchet encryption once fully compatible with Python reference.
+		// Currently causes "Decryption with ratchets failed" on receiving Python clients.
+		//Bytes ratchet = Identity::get_ratchet(_object->_hash);
+		//return _object->_identity.encrypt(data, ratchet);
+		return _object->_identity.encrypt(data);
 	}
 
 // TODO
