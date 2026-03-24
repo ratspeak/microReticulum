@@ -7,6 +7,7 @@
 #include "Link.h"
 #include "Packet.h"
 #include "Identity.h"
+#include "Compression/BZ2.h"
 #include "Log.h"
 
 #include <cstring>
@@ -260,16 +261,23 @@ Bytes RNS::compute_expected_proof(const Bytes& data, const uint8_t resource_hash
 bool OutboundResource::init(const Bytes& plaintext, Link& link, bool auto_compress) {
     _data_size = plaintext.size();
     _flags.encrypted = true;
-    _flags.compressed = false;
 
-    // TODO: bz2 compression when available
-    // For now, send uncompressed
-    Bytes to_encrypt(4 + plaintext.size());
+    // Try bz2 compression (matches Python Resource.py:387-403)
+    Bytes data_to_pack;
+    if (auto_compress) {
+        auto result = Compression::try_compress(plaintext);
+        data_to_pack = result.data;
+        _flags.compressed = result.compressed;
+    } else {
+        data_to_pack = plaintext;
+        _flags.compressed = false;
+    }
+
     // Prepend 4-byte random_hash
     Bytes rh = Identity::get_random_hash();
     memcpy(_random_hash, rh.data(), 4);
-    memcpy(to_encrypt.writable(to_encrypt.size()), _random_hash, 4);
-    memcpy(to_encrypt.writable(to_encrypt.size()) + 4, plaintext.data(), plaintext.size());
+    Bytes to_encrypt(_random_hash, 4);
+    to_encrypt.append(data_to_pack.data(), data_to_pack.size());
 
     // Encrypt with link session key (Resource.py line 424)
     Bytes encrypted = link.encrypt(to_encrypt);
@@ -441,9 +449,19 @@ Bytes InboundResource::assemble(Link& link) {
         _status = ResourceStatus::CORRUPT;
         return Bytes();
     }
-    Bytes plaintext(decrypted.data() + 4, decrypted.size() - 4);
+    Bytes payload(decrypted.data() + 4, decrypted.size() - 4);
 
-    // TODO: bz2 decompress if _flags.compressed
+    // Decompress if compressed (matches Python Resource.py assemble())
+    Bytes plaintext;
+    if (_flags.compressed) {
+        plaintext = Compression::bz2_decompress(payload, _data_size * 2 + 4096);
+        if (plaintext.size() == 0) {
+            _status = ResourceStatus::CORRUPT;
+            return Bytes();
+        }
+    } else {
+        plaintext = payload;
+    }
 
     _status = ResourceStatus::COMPLETE;
     return plaintext;

@@ -4,6 +4,7 @@
 #include <unity.h>
 #include "Identity.h"
 #include "Resource.h"
+#include "Compression/BZ2.h"
 #include "Cryptography/Hashes.h"
 
 #include <string.h>
@@ -200,6 +201,73 @@ void testAdvertisementWithRequestId() {
     TEST_ASSERT_EQUAL_MEMORY("\xDE\xAD\xBE\xEF", unpacked.request_id.data(), 4);
 }
 
+// ── Test 9: bz2 compress/decompress roundtrip ───────────────────────
+
+void testBz2CompressDecompress() {
+    // Create compressible data (repeated pattern)
+    std::string repeated(1000, 'A');
+    RNS::Bytes data((const uint8_t*)repeated.data(), repeated.size());
+
+    RNS::Bytes compressed = RNS::Compression::bz2_compress(data);
+    TEST_ASSERT_TRUE(compressed.size() > 0);
+    TEST_ASSERT_TRUE(compressed.size() < data.size());  // Should compress well
+
+    printf("\n=== BZ2_COMPRESS ===\n");
+    printf("  original: %d bytes, compressed: %d bytes\n", (int)data.size(), (int)compressed.size());
+
+    RNS::Bytes decompressed = RNS::Compression::bz2_decompress(compressed);
+    TEST_ASSERT_EQUAL(data.size(), decompressed.size());
+    TEST_ASSERT_EQUAL_MEMORY(data.data(), decompressed.data(), data.size());
+}
+
+// ── Test 10: try_compress only compresses if beneficial ─────────────
+
+void testTryCompress() {
+    // Highly compressible data
+    std::string big(2000, 'X');
+    RNS::Bytes compressible((const uint8_t*)big.data(), big.size());
+    auto result = RNS::Compression::try_compress(compressible);
+    TEST_ASSERT_TRUE(result.compressed);
+    TEST_ASSERT_TRUE(result.data.size() < compressible.size());
+
+    // Small random-like data (may not compress)
+    uint8_t random_data[50];
+    for (int i = 0; i < 50; i++) random_data[i] = (uint8_t)(i * 37 + 13);
+    RNS::Bytes small_data(random_data, 50);
+    auto result2 = RNS::Compression::try_compress(small_data);
+    // Either compressed or not — both are valid
+    TEST_ASSERT_TRUE(result2.data.size() > 0);
+}
+
+// ── Test 11: bz2 output matches Python/Rust format ──────────────────
+
+void testBz2CrossPlatformFormat() {
+    // bz2 compressed data always starts with "BZh" magic bytes
+    std::string test_data = "Hello from C++ bz2 test!";
+    RNS::Bytes data((const uint8_t*)test_data.data(), test_data.size());
+
+    // Need larger data for compression to be beneficial
+    RNS::Bytes big_data;
+    for (int i = 0; i < 50; i++) big_data.append(data.data(), data.size());
+
+    RNS::Bytes compressed = RNS::Compression::bz2_compress(big_data);
+    TEST_ASSERT_TRUE(compressed.size() >= 3);
+
+    // BZ2 magic: "BZh" (0x42, 0x5A, 0x68)
+    TEST_ASSERT_EQUAL_UINT8(0x42, compressed.data()[0]);  // 'B'
+    TEST_ASSERT_EQUAL_UINT8(0x5A, compressed.data()[1]);  // 'Z'
+    TEST_ASSERT_EQUAL_UINT8(0x68, compressed.data()[2]);  // 'h'
+
+    printf("\n=== BZ2_CROSS_PLATFORM ===\n");
+    printf("  original: %d bytes, compressed: %d bytes\n", (int)big_data.size(), (int)compressed.size());
+    printf("  magic: %c%c%c (BZh)\n", compressed.data()[0], compressed.data()[1], compressed.data()[2]);
+
+    // Verify roundtrip
+    RNS::Bytes decompressed = RNS::Compression::bz2_decompress(compressed);
+    TEST_ASSERT_EQUAL(big_data.size(), decompressed.size());
+    TEST_ASSERT_EQUAL_MEMORY(big_data.data(), decompressed.data(), big_data.size());
+}
+
 // ── Runner ──────────────────────────────────────────────────────────
 
 void setUp() {}
@@ -215,5 +283,8 @@ int main(int argc, char **argv) {
     RUN_TEST(testResourceFlags);
     RUN_TEST(testAdvertisementNilRequestId);
     RUN_TEST(testAdvertisementWithRequestId);
+    RUN_TEST(testBz2CompressDecompress);
+    RUN_TEST(testTryCompress);
+    RUN_TEST(testBz2CrossPlatformFormat);
     return UNITY_END();
 }
