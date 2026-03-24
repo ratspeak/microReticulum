@@ -1152,98 +1152,79 @@ void Link::receive(const Packet& packet) {
 					teardown_packet(packet);
 					break;
 				}
-/*z
 				case Type::Packet::RESOURCE_ADV:
 				{
-					//p packet.plaintext = decrypt(packet.data)
+					// Resource advertisement — decrypt and accept if strategy allows
 					const Bytes plaintext = decrypt(packet.data());
 					if (plaintext) {
-						const_cast<Packet&>(packet).plaintext(plaintext);
-						if (ResourceAdvertisement::is_request(packet)) {
-							Resource::accept(packet, callback=_object->_request_resource_concluded);
-						}
-						else if (ResourceAdvertisement::is_response(packet)) {
-							Bytes request_id = ResourceAdvertisement::read_request_id(packet)
-							for (auto& pending_request : _object->_pending_requests) {
-								if (pending_request.request_id == request_id) {
-									const Bytes response_resource = Resource::accept(packet, callback=_object->_response_resource_concluded, progress_callback=pending_request.response_resource_progress, request_id = request_id);
-									if (response_resource) {
-										//p if pending_request.response_size == None:
-										if (pending_request.response_size == 0) {
-											pending_request.response_size = ResourceAdvertisement::read_size(packet);
+						ResourceAdvertisement adv;
+						if (ResourceAdvertisement::unpack(plaintext, adv)) {
+							if (_object->_resource_strategy == Type::Link::ACCEPT_ALL
+								|| _object->_resource_strategy == Type::Link::ACCEPT_APP) {
+								// Accept the resource
+								auto inbound = std::make_shared<InboundResource>();
+								if (inbound->init(adv, *this)) {
+									_object->_inbound_resources.push_back(inbound);
+									// Send initial request
+									Bytes req = inbound->get_initial_request();
+									if (req.size() > 0) {
+										Bytes encrypted = encrypt(req);
+										if (encrypted) {
+											Packet req_packet(*this, encrypted, Type::Packet::DATA, Type::Packet::RESOURCE_REQ);
+											req_packet.send();
+											had_outbound(true);
 										}
-										//p if pending_request.response_transfer_size == None:
-										if (pending_request.response_transfer_size == 0) {
-											pending_request.response_transfer_size = 0;
-										}
-										pending_request.response_transfer_size += ResourceAdvertisement::read_transfer_size(packet);
-										//p if pending_request.started_at == None:
-										if (pending_request.started_at == 0.0) {
-											pending_request.started_at = OS::time();
-										}
-										pending_request.response_resource_progress(response_resource);
 									}
+									DEBUGF("Accepted inbound resource, %d parts", (int)adv.num_parts);
 								}
 							}
 						}
-						else if (_object->_resource_strategy == ACCEPT_NONE) {
-							//p pass
-						}
-						else if (_object->_resource_strategy == ACCEPT_APP) {
-							if (_object->_callbacks.resource) {
-								try {
-									resource_advertisement = RNS.ResourceAdvertisement.unpack(packet.plaintext());
-									resource_advertisement.link = *this;
-									if (_object->_callbacks.resource(resource_advertisement)) {
-										Resource::accept(packet, _object->_callbacks.resource_concluded);
-									}
-								}
-								catch (std::exception& e) {
-									ERRORF("Error while executing resource accept callback from %s. The contained exception was: %s", toString().c_str(), e.what());
-								}
-						elif _object->_resource_strategy == ACCEPT_ALL:
-							RNS.Resource.accept(packet, _object->_callbacks.resource_concluded)
+					}
 					break;
 				}
 				case Type::Packet::RESOURCE_REQ:
 				{
+					// Resource request from receiver — send requested parts
 					const Bytes plaintext = decrypt(packet.data());
 					if (plaintext) {
-						if ord(plaintext[:1]) == RNS.Resource.HASHMAP_IS_EXHAUSTED:
-							resource_hash = plaintext[1+RNS.Resource.MAPHASH_LEN:Type::Identity::HASHLENGTH//8+1+RNS.Resource.MAPHASH_LEN]
-						else:
-							resource_hash = plaintext[1:Type::Identity::HASHLENGTH//8+1]
-
-						for resource in _object->_outgoing_resources:
-							if resource.hash == resource_hash:
-								// We need to check that this request has not been
-								// received before in order to avoid sequencing errors.
-								if not packet.packet_hash in resource.req_hashlist:
-									resource.req_hashlist.append(packet.packet_hash)
-									resource.request(plaintext)
+						for (auto& resource : _object->_outbound_resources) {
+							auto indices = resource->handle_request(plaintext);
+							for (size_t idx : indices) {
+								Bytes part = resource->get_part(idx);
+								if (part.size() > 0) {
+									// Resource parts are NOT link-encrypted (already encrypted at resource level)
+									Packet part_packet(*this, part, Type::Packet::DATA, Type::Packet::RESOURCE);
+									part_packet.send();
+									had_outbound(true);
+								}
+							}
+						}
+					}
 					break;
 				}
 				case Type::Packet::RESOURCE_HMU:
 				{
-					const Bytes plaintext = decrypt(packet.data());
-					if (plaintext) {
-						resource_hash = plaintext[:Type::Identity::HASHLENGTH//8]
-						for resource in _object->_incoming_resources:
-							if resource_hash == resource.hash:
-								resource.hashmap_update_packet(plaintext)
+					// Hashmap update from receiver — currently not needed for basic transfer
+					// (receiver sends ResourceReq which handles the same purpose)
 					break;
 				}
 				case Type::Packet::RESOURCE_ICL:
 				{
+					// Initiator cancel — remove matching inbound resource
 					const Bytes plaintext = decrypt(packet.data());
-					if (plaintext) {
-						resource_hash = plaintext[:Type::Identity::HASHLENGTH//8]
-						for resource in _object->_incoming_resources:
-							if resource_hash == resource.hash:
-								resource.cancel()
+					if (plaintext && plaintext.size() >= 32) {
+						Bytes resource_hash = plaintext.left(32);
+						_object->_inbound_resources.erase(
+							std::remove_if(_object->_inbound_resources.begin(),
+								_object->_inbound_resources.end(),
+								[&](const auto& r) {
+									return memcmp(r->resource_hash(), resource_hash.data(), 32) == 0;
+								}),
+							_object->_inbound_resources.end()
+						);
+					}
 					break;
 				}
-*/
 				case Type::Packet::KEEPALIVE:
 				{
 					if (!_object->_initiator && packet.data() == "\xFF") {
@@ -1260,36 +1241,46 @@ void Link::receive(const Packet& packet) {
 				// of hash -> sequence map
 				case Type::Packet::RESOURCE:
 				{
-					for (auto& resource : _object->_incoming_resources) {
-						//z resource.receive_part(packet);
+					// Resource data part — NOT link-encrypted (encrypted at resource level)
+					for (auto& resource : _object->_inbound_resources) {
+						if (resource->receive_part(packet.data())) {
+							if (resource->is_complete()) {
+								// Assemble the resource
+								Bytes assembled = resource->assemble(*this);
+								if (assembled.size() > 0) {
+									// Send proof back
+									Bytes proof = resource->generate_proof();
+									if (proof.size() > 0) {
+										Bytes encrypted_proof = encrypt(proof);
+										if (encrypted_proof) {
+											Packet proof_packet(*this, encrypted_proof, Type::Packet::PROOF, Type::Packet::RESOURCE_PRF);
+											proof_packet.send();
+											had_outbound(true);
+										}
+									}
+									// Store assembled data for later retrieval
+									_object->_last_resource_data = assembled;
+									DEBUGF("Inbound resource complete, %d bytes assembled", (int)assembled.size());
+								}
+							}
+							break;
+						}
 					}
 					break;
 				}
-/*z
-				case Type::Packet::CHANNEL:
-				{
-					//z if (!_object->_channel) {
-					if (true) {
-						DEBUG(f"Channel data received without open channel")
-					}
-					else {
-						//z packet.prove();
-						//z plaintext = decrypt(packet.data());
-						//z if (plaintext) {
-						//z 	_object->_channel._receive(plaintext);
-						//z }
-					}
-					break;
-				}
-*/
-				}
-			}
+				// CHANNEL case — not yet implemented
+				// case Type::Packet::CHANNEL: { break; }
+				}  // end switch(context)
+			}  // end if(DATA)
 			else if (packet.packet_type() == Type::Packet::PROOF) {
 				if (packet.context() == Type::Packet::RESOURCE_PRF) {
-					Bytes resource_hash = packet.data().left(Type::Identity::HASHLENGTH/8);
-					for (const auto& resource : _object->_outgoing_resources) {
-						if (resource_hash == resource.hash()) {
-							//z resource.validate_proof(packet.data());
+					const Bytes plaintext = decrypt(packet.data());
+					if (plaintext) {
+						for (auto& resource : _object->_outbound_resources) {
+							if (resource->handle_proof(plaintext)) {
+								DEBUG("Outbound resource proof validated");
+								break;
+							}
 						}
 					}
 				}
@@ -1456,7 +1447,30 @@ void Link::cancel_incoming_resource(const Resource& resource) {
 
 bool Link::ready_for_new_resource() {
 	assert(_object);
-	return (_object->_outgoing_resources.size() > 0);
+	return (_object->_outbound_resources.empty());
+}
+
+bool Link::start_resource_transfer(const Bytes& data) {
+	assert(_object);
+	if (!ready_for_new_resource()) return false;
+
+	auto resource = std::make_shared<OutboundResource>();
+	if (!resource->init(data, *this, true)) return false;
+
+	// Send advertisement
+	ResourceAdvertisement adv = resource->get_advertisement();
+	Bytes adv_packed = adv.pack();
+	Bytes encrypted_adv = encrypt(adv_packed);
+	if (!encrypted_adv) return false;
+
+	Packet adv_packet(*this, encrypted_adv, Type::Packet::DATA, Type::Packet::RESOURCE_ADV);
+	adv_packet.send();
+	had_outbound(true);
+
+	_object->_outbound_resources.push_back(resource);
+	DEBUGF("Started outbound resource transfer, %d parts, %d bytes",
+		(int)resource->num_parts(), (int)adv.transfer_size);
+	return true;
 }
 
 std::string Link::toString() const {

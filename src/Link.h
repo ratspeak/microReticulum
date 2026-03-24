@@ -226,6 +226,10 @@ namespace RNS {
 		void cancel_incoming_resource(const Resource& resource);
 		bool ready_for_new_resource();
 
+		/// Start an outbound resource transfer (for large messages).
+		/// Encrypts data, chunks, computes hashmap, sends advertisement.
+		bool start_resource_transfer(const Bytes& data);
+
 		//void __str__();
 		std::string toString() const;
 

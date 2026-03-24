@@ -13,6 +13,8 @@
 #include "Cryptography/Token.h"
 
 #include <set>
+#include <vector>
+#include <memory>
 
 namespace RNS {
 
@@ -98,8 +100,11 @@ namespace RNS {
 		Bytes _shared_key;
 		Bytes _derived_key;
 
-		std::set<Resource> _incoming_resources;
-		std::set<Resource> _outgoing_resources;
+		std::set<Resource> _incoming_resources;      // Legacy (compatibility)
+		std::set<Resource> _outgoing_resources;     // Legacy (compatibility)
+		std::vector<std::shared_ptr<InboundResource>> _inbound_resources;
+		std::vector<std::shared_ptr<OutboundResource>> _outbound_resources;
+		Bytes _last_resource_data;                  // Most recently assembled resource data
 		std::set<RNS::RequestReceipt> _pending_requests;
 
 	friend class Link;
