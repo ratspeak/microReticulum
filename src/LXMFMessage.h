@@ -24,6 +24,7 @@ struct LXMFMessage {
     int retries = 0;
     unsigned long lastRetryMs = 0;
     uint32_t savedCounter = 0;
+    uint32_t receiveCounter = 0;  // Monotonic receive order (used by Ratcom)
     RNS::Bytes messageId;
 
     static std::vector<uint8_t> packContent(double timestamp, const std::string& content, const std::string& title);
