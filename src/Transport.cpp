@@ -461,6 +461,11 @@ Transport::DestinationEntry empty_destination_entry;
 
 			if (OS::time() > (_tables_last_culled + _tables_cull_interval)) {
 
+				// Deferred culls: run here instead of per-packet to avoid
+				// O(n log n) sorting on every inbound announce.
+				Identity::deferred_cull_known_destinations();
+				cull_announce_table();
+
 				// CBA Disabled following since we're calling immediately after adding to path table now
 				// Cull the path table if it has reached its max size
 				//cull_path_table();
@@ -1665,6 +1670,26 @@ Transport::DestinationEntry empty_destination_entry;
 		// of queued announce rebroadcasts once handed to the next node.
 		if (packet.packet_type() == Type::Packet::ANNOUNCE) {
 			TRACE("Transport::inbound: Packet is ANNOUNCE");
+
+			// Rate limit Ed25519 verification work: max 5 new verifies per second.
+			// Known identities bypass verify via the fast path in validate_announce(),
+			// so this only throttles the expensive crypto for NEW identities.
+			{
+				static double _verify_window_start = 0;
+				static int _verify_count = 0;
+				double now_s = OS::time();
+				if (now_s - _verify_window_start >= 1.0) {
+					_verify_window_start = now_s;
+					_verify_count = 0;
+				}
+				// Check if this is a known identity (fast path won't need verify)
+				bool is_known = (bool)Identity::recall(packet.destination_hash());
+				if (!is_known && ++_verify_count > 5) {
+					DEBUG("Transport::inbound: announce rate-limited (>5 new verifies/sec)");
+					return;
+				}
+			}
+
 			Bytes received_from;
 			//p local_destination = next((d for d in Transport.destinations if d.hash == packet.destination_hash), None)
 			auto iter = _destinations.find(packet.destination_hash());

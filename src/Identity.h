@@ -47,6 +47,7 @@ namespace RNS {
 		static bool _saving_known_destinations;
 		// CBA
 		static uint16_t _known_destinations_maxsize;
+		static bool _known_destinations_dirty;
 		static RatchetTable _known_ratchets;
 
 	public:
@@ -174,6 +175,12 @@ namespace RNS {
 		inline const Cryptography::Ed25519PublicKey::Ptr sig_pub() const { assert(_object); return _object->_sig_pub; }
 		inline static uint16_t known_destinations_maxsize() { return _known_destinations_maxsize; }
 		inline static void known_destinations_maxsize(uint16_t known_destinations_maxsize) { _known_destinations_maxsize = known_destinations_maxsize; }
+		static void deferred_cull_known_destinations() {
+			if (_known_destinations_dirty) {
+				_known_destinations_dirty = false;
+				cull_known_destinations();
+			}
+		}
 
 		inline std::string toString() const { if (!_object) return ""; return "{Identity:" + _object->_hash.toHex() + "}"; }
 

@@ -28,6 +28,7 @@ using namespace RNS::Utilities;
 // CBA
 // CBA ACCUMULATES
 /*static*/ uint16_t Identity::_known_destinations_maxsize = RNS_KNOWN_DESTINATIONS_MAX;
+/*static*/ bool Identity::_known_destinations_dirty = false;
 /*static*/ Identity::RatchetTable Identity::_known_ratchets;
 
 Identity::Identity(bool create_keys /*= true*/) : _object(new Object()) {
@@ -202,11 +203,10 @@ Can be used to load previously created and saved identities into Reticulum.
 		// CBA ACCUMULATES
 		try {
 			// Use insert_or_assign so the timestamp is always refreshed.
-			// Plain insert() is a no-op for existing keys, leaving the old
-			// timestamp — cull then removes the "stale" entry we just validated.
 			_known_destinations.insert_or_assign(destination_hash, IdentityEntry{OS::time(), packet_hash, public_key, app_data});
-			// CBA IMMEDIATE CULL
-			cull_known_destinations();
+			// Defer cull to periodic jobs instead of per-announce to avoid
+			// O(n log n) sorting on every inbound packet.
+			_known_destinations_dirty = true;
 		}
 		catch (const std::bad_alloc&) {
 			ERRORF("remember: bad_alloc - OUT OF MEMORY, identity not stored for %s", destination_hash.toHex().c_str());
@@ -541,15 +541,31 @@ Binary format for known_destinations persistence:
 				}
 			}
 
-			Bytes signed_data;
-			signed_data << destination_hash << public_key << name_hash << random_hash << ratchet << app_data;
-
 			if (!ratchet && packet.data().size() <= keysize + name_hash_len + 10 + sig_len) {
 				app_data.clear();
 			}
 			else if (ratchet && packet.data().size() <= keysize + name_hash_len + 10 + ratchetsize + sig_len) {
 				app_data.clear();
 			}
+
+			// Fast path: if this identity is already known with the same public key,
+			// skip the expensive Ed25519 signature verification (~150ms on ESP32).
+			// Just update app_data/timestamp and return true.
+			auto known_iter = _known_destinations.find(destination_hash);
+			if (known_iter != _known_destinations.end()
+				&& known_iter->second._public_key == public_key) {
+				remember(packet.get_hash(), destination_hash, public_key, app_data);
+				if (ratchet) {
+					remember_ratchet(destination_hash, ratchet);
+				}
+				TRACEF("validate_announce: known identity %s — skipped Ed25519 verify",
+					destination_hash.toHex().c_str());
+				return true;
+			}
+
+			// Slow path: new or changed identity — full Ed25519 verify required
+			Bytes signed_data;
+			signed_data << destination_hash << public_key << name_hash << random_hash << ratchet << app_data;
 
 			Identity announced_identity(false);
 			announced_identity.load_public_key(public_key);
