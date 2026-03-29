@@ -1139,7 +1139,7 @@ Transport::DestinationEntry empty_destination_entry;
 			_receipts.push_back(receipt);
 		}
 
-		if (_transport_enabled) {
+		if (Reticulum::transport_enabled()) {
 			cache_packet(packet);
 		}
 	}
@@ -1398,7 +1398,7 @@ Transport::DestinationEntry empty_destination_entry;
 		}
 
 		// Only cache packets on transport nodes (endpoints don't re-forward)
-		if (_transport_enabled) {
+		if (Reticulum::transport_enabled()) {
 			cache_packet(packet);
 		}
 
@@ -2078,7 +2078,7 @@ Transport::DestinationEntry empty_destination_entry;
 						// Endpoints don't need cached packets — path table is persisted
 						// separately via persist_data(). Caching here causes 0.5-2.3s
 						// flash writes per announce that freeze endpoint devices.
-						if (_transport_enabled) {
+						if (Reticulum::transport_enabled()) {
 							TRACEF("Caching packet %s", packet.get_hash().toHex().c_str());
 							if (RNS::Transport::cache_packet(packet, true)) {
 								packet.cached(true);
