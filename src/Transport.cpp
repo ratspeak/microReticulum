@@ -684,9 +684,11 @@ Transport::DestinationEntry empty_destination_entry;
 
 				unsigned long _tc3 = millis();
 
-//#ifndef NDEBUG
-				dump_stats();
-//#endif
+				// dump_stats() takes 4+ seconds on ESP32 (heap introspection is slow)
+				// Only run when verbose logging is enabled
+				if (RNS::loglevel() >= RNS::LOG_VERBOSE) {
+					dump_stats();
+				}
 				unsigned long _tc4 = millis();
 				if ((_tc4 - _tc0) > 100) {
 					Serial.printf("[JOBS-TIMING] cull_kd=%lums cull_at=%lums tables=%lums stats=%lums TOTAL=%lums\n",
