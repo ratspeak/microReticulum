@@ -1138,8 +1138,10 @@ Transport::DestinationEntry empty_destination_entry;
 			// CBA ACCUMULATES
 			_receipts.push_back(receipt);
 		}
-		
-		cache_packet(packet);
+
+		if (_transport_enabled) {
+			cache_packet(packet);
+		}
 	}
 
 	_jobs_locked = false;
@@ -1395,8 +1397,11 @@ Transport::DestinationEntry empty_destination_entry;
 			_packet_hashlist.insert(packet.packet_hash());
 		}
 
-		cache_packet(packet);
-		
+		// Only cache packets on transport nodes (endpoints don't re-forward)
+		if (_transport_enabled) {
+			cache_packet(packet);
+		}
+
 		// Check special conditions for local clients connected
 		// through a shared Reticulum instance
 		//p from_local_client         = (packet.receiving_interface in Transport.local_client_interfaces)
@@ -2069,11 +2074,15 @@ Transport::DestinationEntry empty_destination_entry;
 							new_announce.send();
 						}
 
-						// Cache announce packet for path persistence (all nodes, not just transport)
-						// Endpoints need cached announces so path table entries survive reboot
-						TRACEF("Caching packet %s", packet.get_hash().toHex().c_str());
-						if (RNS::Transport::cache_packet(packet, true)) {
-							packet.cached(true);
+						// Cache announce packet for transport nodes only.
+						// Endpoints don't need cached packets — path table is persisted
+						// separately via persist_data(). Caching here causes 0.5-2.3s
+						// flash writes per announce that freeze endpoint devices.
+						if (_transport_enabled) {
+							TRACEF("Caching packet %s", packet.get_hash().toHex().c_str());
+							if (RNS::Transport::cache_packet(packet, true)) {
+								packet.cached(true);
+							}
 						}
 						//TRACEF("Adding packet %s to packet table", packet.get_hash().toHex().c_str());
 						//PacketEntry packet_entry(packet);
