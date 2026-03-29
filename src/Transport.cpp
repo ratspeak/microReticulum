@@ -460,11 +460,14 @@ Transport::DestinationEntry empty_destination_entry;
 			}
 
 			if (OS::time() > (_tables_last_culled + _tables_cull_interval)) {
+				unsigned long _tc0 = millis();
 
 				// Deferred culls: run here instead of per-packet to avoid
 				// O(n log n) sorting on every inbound announce.
 				Identity::deferred_cull_known_destinations();
+				unsigned long _tc1 = millis();
 				cull_announce_table();
+				unsigned long _tc2 = millis();
 
 				// CBA Disabled following since we're calling immediately after adding to path table now
 				// Cull the path table if it has reached its max size
@@ -679,9 +682,16 @@ Transport::DestinationEntry empty_destination_entry;
 					ERRORF("jobs: failed to cull tunnel table: %s", e.what());
 				}
 
+				unsigned long _tc3 = millis();
+
 //#ifndef NDEBUG
 				dump_stats();
 //#endif
+				unsigned long _tc4 = millis();
+				if ((_tc4 - _tc0) > 100) {
+					Serial.printf("[JOBS-TIMING] cull_kd=%lums cull_at=%lums tables=%lums stats=%lums TOTAL=%lums\n",
+						_tc1 - _tc0, _tc2 - _tc1, _tc3 - _tc2, _tc4 - _tc3, _tc4 - _tc0);
+				}
 
 				_tables_last_culled = OS::time();
 			}
