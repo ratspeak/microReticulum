@@ -77,6 +77,14 @@ namespace RNS {
         float _expected_rate = 0.0;
 		Type::Link::teardown_reason _teardown_reason = Type::Link::TEARDOWN_NONE;
 
+		// Link proof retry state (responder side: resend proof if RTT not received)
+		Bytes _cached_proof_data;
+		double _last_proof_send = 0.0;
+		int _proof_retries = 0;
+		static constexpr int MAX_PROOF_RETRIES = 3;
+		static constexpr double PROOF_RETRY_INITIAL = 2.0;   // seconds before first retry
+		static constexpr double PROOF_RETRY_BACKOFF = 2.0;   // multiplier per retry
+
 		Cryptography::Token::Ptr _token;
 
 		Cryptography::X25519PrivateKey::Ptr _prv;

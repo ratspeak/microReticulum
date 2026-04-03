@@ -397,7 +397,6 @@ void Destination::receive(const Packet& packet) {
 	else {
 		// CBA TODO Why isn't the Packet decrypting itself?
 		Bytes plaintext(decrypt(packet.data()));
-		//TRACEF("Destination::receive: decrypted data: %s", plaintext.toHex().c_str());
 		if (plaintext) {
 			if (packet.packet_type() == Type::Packet::DATA) {
 				if (_object->_callbacks._packet) {
@@ -409,6 +408,10 @@ void Destination::receive(const Packet& packet) {
 					}
 				}
 			}
+		}
+		else {
+			Serial.printf("[DEST] DECRYPT FAILED for %d byte packet to %s\n",
+				(int)packet.data().size(), packet.destination_hash().toHex().substr(0, 16).c_str());
 		}
 	}
 }

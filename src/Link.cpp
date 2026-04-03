@@ -213,6 +213,9 @@ Link::Link(const Destination& destination /*= {Type::NONE}*/, Callbacks::establi
 			link.last_inbound(OS::time());
 			link.start_watchdog();
 			
+			Serial.printf("[LINK-DIAG] Link %s accepted, rx_iface=%s\n",
+				link.link_id().toHex().substr(0, 16).c_str(),
+				packet.receiving_interface().toString().c_str());
 			DEBUGF("Incoming link request %s accepted", link.toString().c_str());
 			return link;
 		}
@@ -277,7 +280,12 @@ void Link::prove() {
 	assert(_object);
 	DEBUGF("Link %s requesting proof", link_id().toHex().c_str());
 	Bytes signalling_bytes = Link::signalling_bytes(_object->_mtu, _object->_mode);
-	Bytes signed_data = _object->_link_id + _object->_pub_bytes + _object->_sig_pub_bytes + signalling_bytes;
+	// Python validate_proof() reconstructs signed_data using the destination's
+	// identity Ed25519 key, NOT the link's ephemeral Ed25519 key.
+	// Reference: Python Link.py line 412:
+	//   peer_sig_pub_bytes = self.destination.identity.get_public_key()[ECPUBSIZE//2:ECPUBSIZE]
+	const Bytes& owner_sig_pub = _object->_owner.identity().signingPublicKey();
+	Bytes signed_data = _object->_link_id + _object->_pub_bytes + owner_sig_pub + signalling_bytes;
 	const Bytes signature(_object->_owner.identity().sign(signed_data));
 
 	Bytes proof_data = signature + _object->_pub_bytes + signalling_bytes;
@@ -285,18 +293,54 @@ void Link::prove() {
 	// Diagnostic: dump proof components for cross-implementation debugging
 	VERBOSEF("[LINK-PROOF] link_id:     %s", _object->_link_id.toHex().c_str());
 	VERBOSEF("[LINK-PROOF] pub_bytes:   %s", _object->_pub_bytes.toHex().c_str());
-	VERBOSEF("[LINK-PROOF] sig_pub:     %s", _object->_sig_pub_bytes.toHex().c_str());
+	VERBOSEF("[LINK-PROOF] sig_pub:     %s (owner identity)", owner_sig_pub.toHex().c_str());
 	VERBOSEF("[LINK-PROOF] signalling:  %s (mtu=%d mode=%d)", signalling_bytes.toHex().c_str(), _object->_mtu, _object->_mode);
 	VERBOSEF("[LINK-PROOF] signed_data: %s (%d bytes)", signed_data.toHex().c_str(), (int)signed_data.size());
 	VERBOSEF("[LINK-PROOF] signature:   %s", signature.toHex().c_str());
 	VERBOSEF("[LINK-PROOF] proof_data:  %d bytes", (int)proof_data.size());
 
-	// CBA LINK
-	// CBA TODO: Determine which approach is better, passing liunk to packet or passing _link_destination
+	// Cache proof data for retry if RTT doesn't arrive (LoRa packet loss recovery)
+	_object->_cached_proof_data = proof_data;
+	_object->_last_proof_send = OS::time();
+	_object->_proof_retries = 0;
+
+	// Small random delay (50-200ms) to reduce collision with initiator's concurrent TX
+	delay(random(50, 200));
+
 	Packet proof(*this, proof_data, Type::Packet::PROOF, Type::Packet::LRPROOF);
 	proof.send();
 	_object->_establishment_cost += proof.raw().size();
 	had_outbound();
+	Serial.printf("[LINK] Proof sent for %s, will retry if no RTT\n", link_id().toHex().substr(0, 16).c_str());
+}
+
+void Link::retry_proof() {
+	assert(_object);
+	if (_object->_cached_proof_data.size() == 0) return;
+	if (_object->_status != Type::Link::HANDSHAKE) return;
+
+	double now = OS::time();
+	double interval = LinkData::PROOF_RETRY_INITIAL;
+	for (int i = 0; i < _object->_proof_retries; i++) {
+		interval *= LinkData::PROOF_RETRY_BACKOFF;
+	}
+
+	if (now - _object->_last_proof_send >= interval) {
+		if (_object->_proof_retries < LinkData::MAX_PROOF_RETRIES) {
+			_object->_proof_retries++;
+			_object->_last_proof_send = now;
+			Serial.printf("[LINK] Retrying proof for %s (attempt %d/%d, interval %.0fs)\n",
+				link_id().toHex().substr(0, 16).c_str(),
+				_object->_proof_retries, LinkData::MAX_PROOF_RETRIES, interval);
+			Packet proof(*this, _object->_cached_proof_data, Type::Packet::PROOF, Type::Packet::LRPROOF);
+			proof.send();
+			had_outbound();
+		} else {
+			Serial.printf("[LINK] Proof retries exhausted for %s, tearing down\n",
+				link_id().toHex().substr(0, 16).c_str());
+			teardown();
+		}
+	}
 }
 
 void Link::prove_packet(const Packet& packet) {
@@ -513,6 +557,10 @@ void Link::update_mdu() {
 
 void Link::rtt_packet(const Packet& packet) {
 	assert(_object);
+	Serial.printf("[LINK-DIAG] RTT packet received! link=%s (after %d proof retries)\n",
+		link_id().toHex().substr(0, 16).c_str(), _object->_proof_retries);
+	// Clear cached proof — handshake complete, no more retries needed
+	_object->_cached_proof_data = Bytes();
 	try {
 		double measured_rtt = OS::time() - _object->_request_time;
 		const Bytes plaintext(decrypt(packet.data()));
@@ -1010,7 +1058,15 @@ void Link::receive(const Packet& packet) {
 	_object->_watchdog_lock = true;
 	if (_object->_status != Type::Link::CLOSED && !(_object->_initiator && packet.context() == Type::Packet::KEEPALIVE && packet.data() == "\xFF")) {
 		if (packet.receiving_interface() != _object->_attached_interface) {
-			ERROR("Link-associated packet received on unexpected interface! Someone might be trying to manipulate your communication!");
+			ERRORF("Link packet on WRONG interface! rx=%s attached=%s ctx=0x%02X",
+				packet.receiving_interface().toString().c_str(),
+				_object->_attached_interface.toString().c_str(),
+				(int)packet.context());
+			Serial.printf("[LINK-DIAG] INTERFACE MISMATCH! rx=%s attached=%s link=%s ctx=0x%02X\n",
+				packet.receiving_interface().toString().c_str(),
+				_object->_attached_interface.toString().c_str(),
+				link_id().toHex().substr(0, 16).c_str(),
+				(int)packet.context());
 		}
 		else {
 			_object->_last_inbound = OS::time();

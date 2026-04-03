@@ -174,6 +174,7 @@ namespace RNS {
 		void set_link_id(const Packet& packet);
 		void handshake();
 		void prove();
+		void retry_proof();
 		void prove_packet(const Packet& packet);
 		void validate_proof(const Packet& packet);
 		void identify(const Identity& identity);

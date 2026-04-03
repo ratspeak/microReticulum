@@ -314,6 +314,11 @@ Transport::DestinationEntry empty_destination_entry;
 					if (link.status() == Type::Link::CLOSED) {
 						_active_links.erase(link);
 					}
+					// Watchdog: retry proof for links stuck in HANDSHAKE
+					// (responder sent proof but RTT never arrived — packet lost on air)
+					else if (link.status() == Type::Link::HANDSHAKE) {
+						const_cast<Link&>(link).retry_proof();
+					}
 				}
 
 				_links_last_checked = OS::time();
