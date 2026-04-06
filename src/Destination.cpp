@@ -262,9 +262,24 @@ Packet Destination::announce(const Bytes& app_data, bool path_response, const In
 		else {
 			Bytes destination_hash = _object->_hash;
 			//p random_hash = Identity::get_random_hash()[0:5] + int(time.time()).to_bytes(5, "big")
-			// 5 random bytes + 5 big-endian timestamp bytes (matches Python reference)
+			// 5 random bytes + 5 big-endian epoch timestamp bytes (matches Python reference)
+			// CRITICAL: Must use Unix epoch (like Python's time.time()), NOT OS::time()
+			// which returns uptime on Arduino. Python Transport compares these timestamps
+			// for announce freshness — uptime-based values cause re-announces to be
+			// rejected by nodes that have cached a previous epoch-based timestamp.
 			Bytes random_part = Cryptography::random(5);
+#ifdef ARDUINO
+			// On ESP32, time(nullptr) returns Unix epoch after NTP sync,
+			// or ~0 before sync. Either is better than millis()-based uptime.
+			uint64_t ts = (uint64_t)::time(nullptr);
+			if (ts < 1700000000) {
+				// NTP not yet synced — fall back to OS::time() (uptime seconds).
+				// Not ideal, but the announce will still work for first-time paths.
+				ts = (uint64_t)OS::time();
+			}
+#else
 			uint64_t ts = (uint64_t)OS::time();
+#endif
 			uint8_t time_bytes[5];
 			time_bytes[0] = (ts >> 32) & 0xFF;
 			time_bytes[1] = (ts >> 24) & 0xFF;
@@ -279,26 +294,27 @@ Packet Destination::announce(const Bytes& app_data, bool path_response, const In
 			}
 
 			Bytes signed_data;
-			//TRACEF("Destination::announce: hash:         %s", _object->_hash.toHex().c_str());
-			//TRACEF("Destination::announce: public key:   %s", _object->_identity.get_public_key().toHex().c_str());
-			//TRACEF("Destination::announce: name hash:    %s", _object->_name_hash.toHex().c_str());
-			//TRACEF("Destination::announce: random hash:  %s", random_hash.toHex().c_str());
-			//TRACEF("Destination::announce: app data:     %s", new_app_data.toHex().c_str());
-			//TRACEF("Destination::announce: app data text:%s", new_app_data.toString().c_str());
+			TRACEF("[ANN-DIAG] dest_hash:   %s", _object->_hash.toHex().c_str());
+			TRACEF("[ANN-DIAG] identity:    %s", _object->_identity.hash().toHex().c_str());
+			TRACEF("[ANN-DIAG] pub_key(%d): %s", (int)_object->_identity.get_public_key().size(), _object->_identity.get_public_key().toHex().c_str());
+			TRACEF("[ANN-DIAG] name_hash:   %s", _object->_name_hash.toHex().c_str());
+			TRACEF("[ANN-DIAG] random_hash: %s", random_hash.toHex().c_str());
+			TRACEF("[ANN-DIAG] app_data(%d):%s", (int)new_app_data.size(), new_app_data.toHex().c_str());
 			signed_data << _object->_hash << _object->_identity.get_public_key() << _object->_name_hash << random_hash;
 			if (new_app_data) {
 				signed_data << new_app_data;
 			}
-			//TRACEF("Destination::announce: signed data:  %s", signed_data.toHex().c_str());
+			TRACEF("[ANN-DIAG] signed_data(%d): %s", (int)signed_data.size(), signed_data.toHex().c_str());
 
 			Bytes signature(_object->_identity.sign(signed_data));
-			//TRACEF("Destination::announce: signature:    %s", signature.toHex().c_str());
+			TRACEF("[ANN-DIAG] signature:   %s", signature.toHex().c_str());
 
 			announce_data << _object->_identity.get_public_key() << _object->_name_hash << random_hash << signature;
 
 			if (new_app_data) {
 				announce_data << new_app_data;
 			}
+			TRACEF("[ANN-DIAG] announce_data(%d): %s", (int)announce_data.size(), announce_data.toHex().c_str());
 
 			// CBA ACCUMULATES
 			try {
@@ -390,24 +406,34 @@ bool Destination::deregister_request_handler(const Bytes& path) {
 
 void Destination::receive(const Packet& packet) {
 	assert(_object);
+	Serial.printf("[DEST-RX] receive: pkt_type=%d data=%d bytes dest=%s\n",
+		(int)packet.packet_type(), (int)packet.data().size(),
+		packet.destination_hash().toHex().substr(0, 12).c_str());
 	if (packet.packet_type() == Type::Packet::LINKREQUEST) {
+		Serial.println("[DEST-RX] → LINKREQUEST, entering incoming_link_request");
 		Bytes plaintext(packet.data());
 		incoming_link_request(plaintext, packet);
+		Serial.println("[DEST-RX] ← LINKREQUEST done");
 	}
 	else {
 		// CBA TODO Why isn't the Packet decrypting itself?
+		Serial.printf("[DEST-RX] → decrypting %d bytes...\n", (int)packet.data().size());
 		Bytes plaintext(decrypt(packet.data()));
 		if (plaintext) {
+			Serial.printf("[DEST-RX] decrypt OK, %d bytes plaintext\n", (int)plaintext.size());
 			if (packet.packet_type() == Type::Packet::DATA) {
 				if (_object->_callbacks._packet) {
 					try {
+						Serial.println("[DEST-RX] → calling packet callback");
 						_object->_callbacks._packet(plaintext, packet);
+						Serial.println("[DEST-RX] ← packet callback done");
 					}
 					catch (std::exception& e) {
 						DEBUGF("Error while executing receive callback from %s. The contained exception was: %s", toString().c_str(), e.what());
 					}
 				}
 			}
+			Serial.println("[DEST-RX] → proving packet");
 		}
 		else {
 			Serial.printf("[DEST] DECRYPT FAILED for %d byte packet to %s\n",

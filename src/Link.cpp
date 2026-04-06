@@ -176,8 +176,10 @@ Link::Link(const Destination& destination /*= {Type::NONE}*/, Callbacks::establi
 }
 
 /*static*/ Link Link::validate_request( const Destination& owner, const Bytes& data, const Packet& packet) {
+	Serial.printf("[LINK-VR] validate_request: data=%d bytes\n", (int)data.size());
 	if (data.size() == ECPUBSIZE || data.size() == ECPUBSIZE + LINK_MTU_SIZE) {
 		try {
+			Serial.println("[LINK-VR] creating link object...");
 			Link link({Type::NONE}, nullptr, nullptr, owner, data.left(ECPUBSIZE/2), data.mid(ECPUBSIZE/2, ECPUBSIZE/2));
 			link.set_link_id(packet);
 
@@ -205,9 +207,13 @@ Link::Link(const Destination& destination /*= {Type::NONE}*/, Callbacks::establi
 			VERBOSEF("Validating link request %s", link.link_id().toHex().c_str());
             TRACEF("Link MTU configured to %d", link.mtu());
 			TRACEF("Establishment timeout is %f for incoming link request %s", link.establishment_timeout(), link.link_id().toHex().c_str());
+			Serial.printf("[LINK-VR] → handshake (ECDH)... heap=%d\n", (int)ESP.getFreeHeap());
 			link.handshake();
+			Serial.println("[LINK-VR] ← handshake done");
 			link.attached_interface(packet.receiving_interface());
+			Serial.println("[LINK-VR] → prove (Ed25519 sign + send)...");
 			link.prove();
+			Serial.println("[LINK-VR] ← prove done");
 			link.request_time(OS::time());
 			Transport::register_link(link);
 			link.last_inbound(OS::time());
@@ -304,8 +310,12 @@ void Link::prove() {
 	_object->_last_proof_send = OS::time();
 	_object->_proof_retries = 0;
 
-	// Small random delay (50-200ms) to reduce collision with initiator's concurrent TX
-	delay(random(50, 200));
+	// Small random delay to reduce collision on half-duplex radio links.
+	// Only apply for non-TCP interfaces (LoRa, etc.) where TX collision is real.
+	if (_object->_attached_interface
+		&& _object->_attached_interface.toString().find("TCP") == std::string::npos) {
+		delay(random(50, 200));
+	}
 
 	Packet proof(*this, proof_data, Type::Packet::PROOF, Type::Packet::LRPROOF);
 	proof.send();
@@ -332,9 +342,13 @@ void Link::retry_proof() {
 			Serial.printf("[LINK] Retrying proof for %s (attempt %d/%d, interval %.0fs)\n",
 				link_id().toHex().substr(0, 16).c_str(),
 				_object->_proof_retries, LinkData::MAX_PROOF_RETRIES, interval);
+			Serial.printf("[LINK-RETRY] creating packet... heap=%d\n", (int)ESP.getFreeHeap());
 			Packet proof(*this, _object->_cached_proof_data, Type::Packet::PROOF, Type::Packet::LRPROOF);
+			Serial.println("[LINK-RETRY] → proof.send()...");
 			proof.send();
+			Serial.println("[LINK-RETRY] ← proof.send() done");
 			had_outbound();
+			Serial.println("[LINK-RETRY] complete");
 		} else {
 			Serial.printf("[LINK] Proof retries exhausted for %s, tearing down\n",
 				link_id().toHex().substr(0, 16).c_str());
@@ -1080,27 +1094,31 @@ void Link::receive(const Packet& packet) {
 			}
 
 			if (packet.packet_type() == Type::Packet::DATA) {
-				VERBOSEF("[LINK-RX] context=0x%02X status=%d initiator=%d", (int)packet.context(), (int)_object->_status, _object->_initiator);
+				Serial.printf("[LINK-RX] DATA ctx=0x%02X data=%d bytes heap=%d\n",
+					(int)packet.context(), (int)packet.data().size(), (int)ESP.getFreeHeap());
 				bool should_query = false;
 				switch (packet.context()) {
 				case Type::Packet::CONTEXT_NONE:
 				{
+					Serial.println("[LINK-RX] → link decrypt...");
 					const Bytes plaintext = decrypt(packet.data());
 					if (plaintext) {
+						Serial.printf("[LINK-RX] decrypt OK, %d bytes\n", (int)plaintext.size());
 						if (_object->_callbacks._packet) {
-							//z thread = threading.Thread(target=_object->_callbacks.packet, args=(plaintext, packet))
-							//z thread.daemon = True
-							//z thread.start()
 							try {
+								Serial.println("[LINK-RX] → packet callback...");
 								_object->_callbacks._packet(plaintext, packet);
+								Serial.println("[LINK-RX] ← packet callback done");
 							}
 							catch (std::exception& e) {
 								ERRORF("Error while executing packet callback from %s. The contained exception was: %s", toString().c_str(), e.what());
 							}
 						}
-						
+
 						if (_object->_destination.proof_strategy() == Type::Destination::PROVE_ALL) {
+							Serial.println("[LINK-RX] → prove_packet...");
 							const_cast<Packet&>(packet).prove();
+							Serial.println("[LINK-RX] ← prove_packet done");
 							should_query = true;
 						}
 						else if (_object->_destination.proof_strategy() == Type::Destination::PROVE_APP) {
@@ -1121,6 +1139,7 @@ void Link::receive(const Packet& packet) {
 				}
 				case Type::Packet::LINKIDENTIFY:
 				{
+					Serial.printf("[LINK-RX] LINKIDENTIFY %d bytes\n", (int)packet.data().size());
 					const Bytes plaintext = decrypt(packet.data());
 					if (plaintext) {
 						if (!(_object->_initiator) && plaintext.size() == Type::Identity::KEYSIZE/8 + Type::Identity::SIGLENGTH/8) {
@@ -1210,6 +1229,8 @@ void Link::receive(const Packet& packet) {
 				}
 				case Type::Packet::RESOURCE_ADV:
 				{
+					Serial.printf("[LINK-RX] RESOURCE_ADV %d bytes heap=%d\n",
+						(int)packet.data().size(), (int)ESP.getFreeHeap());
 					// Resource advertisement — decrypt and accept if strategy allows
 					const Bytes plaintext = decrypt(packet.data());
 					if (plaintext) {
@@ -1621,6 +1642,11 @@ bool Link::initiator() const {
 void Link::destination(const Destination& destination) {
 	assert(_object);
 	_object->_destination = destination;
+}
+
+const Interface& Link::attached_interface() const {
+	assert(_object);
+	return _object->_attached_interface;
 }
 
 void Link::attached_interface(const Interface& interface) {

@@ -318,6 +318,7 @@ Transport::DestinationEntry empty_destination_entry;
 					// (responder sent proof but RTT never arrived — packet lost on air)
 					else if (link.status() == Type::Link::HANDSHAKE) {
 						const_cast<Link&>(link).retry_proof();
+						Serial.println("[TRANSPORT] retry_proof returned OK");
 					}
 				}
 
@@ -805,11 +806,10 @@ Transport::DestinationEntry empty_destination_entry;
 
 	TRACEF("Transport::outbound: destination=%s hops=%d", packet.destination_hash().toHex().c_str(), packet.hops());
 
-	while (_jobs_running) {
-		TRACE("Transport::outbound: sleeping...");
-		OS::sleep(0.0005);
-	}
-
+	// NOTE: The Python reference has `while jobs_running: sleep()` here,
+	// but on single-threaded ESP32 (Arduino), jobs/inbound/outbound all run
+	// on the same thread. Waiting for _jobs_running would deadlock when
+	// outbound() is called from within jobs() (e.g. link proof retry).
 	_jobs_locked = true;
 
 	bool sent = false;
@@ -1321,10 +1321,12 @@ Transport::DestinationEntry empty_destination_entry;
 	}
 */
 
-	while (_jobs_running) {
-		TRACE("Transport::inbound: sleeping...");
-		OS::sleep(0.0005);
-	}
+	Serial.printf("[TRANSPORT] inbound: %d bytes from %s, jobs_locked=%d jobs_running=%d\n",
+		(int)raw.size(), interface ? interface.toString().c_str() : "NULL",
+		(int)_jobs_locked, (int)_jobs_running);
+
+	// NOTE: _jobs_running wait removed — single-threaded ESP32 deadlocks
+	// when inbound() is called from within jobs() (e.g. loopback packets).
 
 	if (!_identity) {
 		WARNING("Transport::inbound: No identity!");
@@ -1334,10 +1336,15 @@ Transport::DestinationEntry empty_destination_entry;
 	_jobs_locked = true;
 
 	Packet packet(RNS::Destination(RNS::Type::NONE), raw);
+	Serial.printf("[TRANSPORT] unpacking %d bytes...\n", (int)raw.size());
 	if (!packet.unpack()) {
 		WARNING("Transport::inbound: Packet unpack failed!");
+		_jobs_locked = false;  // FIX: was missing, would deadlock jobs
 		return;
 	}
+	Serial.printf("[TRANSPORT] unpacked: pt=%d dt=%d dest=%s\n",
+		(int)packet.packet_type(), (int)packet.destination_type(),
+		packet.destination_hash().toHex().substr(0, 12).c_str());
 #ifndef NDEBUG
 	TRACEF("Transport::inbound: packet: %s", packet.debugString().c_str());
 #endif
@@ -1520,6 +1527,7 @@ Transport::DestinationEntry empty_destination_entry;
 			if (packet.context() == Type::Packet::CACHE_REQUEST) {
 				if (cache_request_packet(packet)) {
 					TRACE("Transport::inbound: Cached packet");
+					_jobs_locked = false;
 					return;
 				}
 			}
@@ -1607,6 +1615,7 @@ Transport::DestinationEntry empty_destination_entry;
 										}
 										catch (const std::exception& e) {
 											WARNINGF("Dropping link request packet. The contained exception was: %s", e.what());
+											_jobs_locked = false;
 											return;
 										}
 									}
@@ -1743,6 +1752,7 @@ Transport::DestinationEntry empty_destination_entry;
 				bool is_known = (bool)Identity::recall(packet.destination_hash());
 				if (!is_known && ++_verify_count > 5) {
 					DEBUG("Transport::inbound: announce rate-limited (>5 new verifies/sec)");
+					_jobs_locked = false;
 					return;
 				}
 			}

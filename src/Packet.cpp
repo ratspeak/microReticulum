@@ -68,6 +68,11 @@ Packet::Packet(const Link& link, const Bytes& data, Type::Packet::types packet_t
 	TRACE("Creating packet with link...");
 	_object->_destination_link = link;
 	_object->_MTU = link.mtu();
+	// Route all link packets through the interface the link was established on.
+	// This ensures TCP links stay on TCP, LoRa links stay on LoRa, etc.
+	if (link.attached_interface()) {
+		_object->_attached_interface = link.attached_interface();
+	}
 	// CBA HACK: Need to re-build packed flags since Link was assigned
 	_object->_flags = get_packed_flags();
 	MEMF("Packet link object created, this: %p, data: %p", (void*)this, (void*)_object.get());
@@ -374,6 +379,12 @@ TRACEF("***** Destination Data: %s", _object->_ciphertext.toHex().c_str());
 			(int)_object->_raw.size(),
 			_object->_raw.data()[0], _object->_raw.data()[1],
 			_object->_raw.data()[2], _object->_raw.data()[3]);
+	}
+
+	if (_object->_packet_type == ANNOUNCE) {
+		TRACEF("[ANN-DIAG] PACKED: flags=0x%02x hops=%d ctx=0x%02x raw(%d): %s",
+			_object->_flags, _object->_hops, _object->_context,
+			(int)_object->_raw.size(), _object->_raw.toHex().c_str());
 	}
 
 	if (_object->_raw.size() > _object->_MTU) {
