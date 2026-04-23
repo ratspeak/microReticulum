@@ -1,84 +1,30 @@
-/// BZ2 compression implementation using vendored libbzip2.
+/// BZ2 compression shim — no-op on this build.
+///
+/// The vendored libbzip2 is intentionally NOT linked on embedded targets:
+/// bzip2's working-set memory and decode-table state are too large for
+/// MCU-class devices (a single decompress can use multiples of available
+/// SRAM). The functions below are kept so callers in Resource.cpp can
+/// still link against this symbol surface without any conditional
+/// compilation, but they never compress and never decompress.
+///
+/// To re-introduce a portable compression scheme later, replace these
+/// implementations with something MCU-safe (e.g. heatshrink or LZ4) and
+/// negotiate support through the LXMF announce capability list, NOT bz2.
+
 #include "BZ2.h"
-
-extern "C" {
-#include "bzlib.h"
-}
-
-#include <cstdlib>
-#include <cstring>
-#include <algorithm>
 
 namespace RNS {
 namespace Compression {
 
-Bytes bz2_compress(const uint8_t* data, size_t len) {
-    if (len == 0) return Bytes();
-
-    // bz2 output can be slightly larger than input for incompressible data
-    unsigned int dest_len = (unsigned int)(len + len / 100 + 600);
-    char* dest = (char*)malloc(dest_len);
-    if (!dest) return Bytes();
-
-    int ret = BZ2_bzBuffToBuffCompress(
-        dest, &dest_len,
-        (char*)data, (unsigned int)len,
-        9,    // blockSize100k (1-9, 9 = best compression)
-        0,    // verbosity
-        30    // workFactor (default)
-    );
-
-    if (ret != BZ_OK) {
-        free(dest);
-        return Bytes();
-    }
-
-    Bytes result((const uint8_t*)dest, dest_len);
-    free(dest);
-    return result;
+Bytes bz2_compress(const uint8_t* /*data*/, size_t /*len*/) {
+    return Bytes();
 }
 
-Bytes bz2_decompress(const uint8_t* data, size_t len, size_t max_size) {
-    if (len == 0) return Bytes();
-
-    // Try with progressively larger buffers
-    size_t multipliers[] = {4, 16, 64, 256};
-    for (size_t mult : multipliers) {
-        unsigned int dest_len = (unsigned int)(len * mult);
-        if (dest_len < 1024) dest_len = 1024;
-        if (max_size > 0 && dest_len > (unsigned int)max_size) dest_len = (unsigned int)max_size;
-
-        char* dest = (char*)malloc(dest_len);
-        if (!dest) return Bytes();
-
-        int ret = BZ2_bzBuffToBuffDecompress(
-            dest, &dest_len,
-            (char*)data, (unsigned int)len,
-            0, 0  // small=0, verbosity=0
-        );
-
-        if (ret == BZ_OK) {
-            if (max_size > 0 && dest_len > (unsigned int)max_size) {
-                free(dest);
-                return Bytes();
-            }
-            Bytes result((const uint8_t*)dest, dest_len);
-            free(dest);
-            return result;
-        }
-
-        free(dest);
-        if (ret != BZ_OUTBUFF_FULL) return Bytes();  // Unrecoverable error
-    }
-
+Bytes bz2_decompress(const uint8_t* /*data*/, size_t /*len*/, size_t /*max_size*/) {
     return Bytes();
 }
 
 CompressResult try_compress(const Bytes& data) {
-    Bytes compressed = bz2_compress(data);
-    if (compressed.size() > 0 && compressed.size() < data.size()) {
-        return { compressed, true };
-    }
     return { data, false };
 }
 

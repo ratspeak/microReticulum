@@ -97,8 +97,9 @@ class OutboundResource {
 public:
     OutboundResource() = default;
 
-    /// Initialize from raw data. Compresses, encrypts, chunks, computes hashmap.
-    bool init(const Bytes& plaintext, Link& link, bool auto_compress = true);
+    /// Initialize from raw data. Encrypts, chunks, computes hashmap.
+    /// auto_compress is accepted for API parity but ignored — see Resource.cpp.
+    bool init(const Bytes& plaintext, Link& link, bool auto_compress = false);
 
     /// Get the advertisement to send.
     ResourceAdvertisement get_advertisement() const;
@@ -198,7 +199,7 @@ public:
     Resource(Type::NoneConstructor none) {}
     Resource(const Resource& resource) : _object(resource._object) {}
     Resource(const Bytes& data, const Link& link, const Bytes& request_id, bool is_response, double timeout = 0.0);
-    Resource(const Bytes& data, const Link& link, bool advertise = true, bool auto_compress = true,
+    Resource(const Bytes& data, const Link& link, bool advertise = true, bool auto_compress = false,
              Callbacks::concluded callback = nullptr, Callbacks::progress progress_callback = nullptr,
              double timeout = 0.0, int segment_index = 1, const Bytes& original_hash = {Type::NONE},
              const Bytes& request_id = {Type::NONE}, bool is_response = false);

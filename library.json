@@ -27,5 +27,17 @@
 	"export": {},
 	"exclude": [
 		".github"
-	]
+	],
+	"build": {
+		"srcFilter": [
+			"+<*>",
+			"-<Compression/blocksort.c>",
+			"-<Compression/bz2_compress.c>",
+			"-<Compression/bz2_decompress.c>",
+			"-<Compression/bzlib.c>",
+			"-<Compression/crctable.c>",
+			"-<Compression/huffman.c>",
+			"-<Compression/randtable.c>"
+		]
+	}
 }

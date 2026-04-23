@@ -258,20 +258,16 @@ Bytes RNS::compute_expected_proof(const Bytes& data, const uint8_t resource_hash
 // OutboundResource
 // ============================================================
 
-bool OutboundResource::init(const Bytes& plaintext, Link& link, bool auto_compress) {
+bool OutboundResource::init(const Bytes& plaintext, Link& link, bool /*auto_compress*/) {
     _data_size = plaintext.size();
     _flags.encrypted = true;
 
-    // Try bz2 compression (matches Python Resource.py:387-403)
-    Bytes data_to_pack;
-    if (auto_compress) {
-        auto result = Compression::try_compress(plaintext);
-        data_to_pack = result.data;
-        _flags.compressed = result.compressed;
-    } else {
-        data_to_pack = plaintext;
-        _flags.compressed = false;
-    }
+    // Compression is intentionally disabled on this build — see BZ2.cpp.
+    // The auto_compress parameter is kept for API parity with Python Resource
+    // but ignored: bz2 is too heavy for MCU targets, and we advertise
+    // SF_COMPRESSION-absent in our LXMF announces so peers won't compress for us.
+    Bytes data_to_pack = plaintext;
+    _flags.compressed = false;
 
     // Prepend 4-byte random_hash
     Bytes rh = Identity::get_random_hash();
@@ -451,17 +447,19 @@ Bytes InboundResource::assemble(Link& link) {
     }
     Bytes payload(decrypted.data() + 4, decrypted.size() - 4);
 
-    // Decompress if compressed (matches Python Resource.py assemble())
+    // bz2 decompression is intentionally not available on this build (see BZ2.cpp).
+    // If a peer ships a compressed resource anyway — either an old Python LXMF that
+    // pre-dates the SF_COMPRESSION advertisement, or any peer ignoring our empty
+    // supported_functionality list — drop the resource cleanly rather than burning
+    // hundreds of KB of MCU RAM trying to decode it.
     Bytes plaintext;
     if (_flags.compressed) {
-        plaintext = Compression::bz2_decompress(payload, _data_size * 2 + 4096);
-        if (plaintext.size() == 0) {
-            _status = ResourceStatus::CORRUPT;
-            return Bytes();
-        }
-    } else {
-        plaintext = payload;
+        WARNING("Resource: dropping compressed inbound payload (bz2 not supported on this build; "
+                "peer ignored SF_COMPRESSION advertisement)");
+        _status = ResourceStatus::CORRUPT;
+        return Bytes();
     }
+    plaintext = payload;
 
     _status = ResourceStatus::COMPLETE;
     return plaintext;
