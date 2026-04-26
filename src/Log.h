@@ -2,6 +2,32 @@
 
 #ifdef ARDUINO
 #include <Arduino.h>
+#else
+// Native-target shims: debug instrumentation in Transport/Destination/Link uses
+// Arduino's `Serial`, `millis()`, `delay()`, `random()`, and ESP32's
+// `ESP.getFreeHeap()`. Provide no-op stand-ins so the same code compiles
+// cleanly on the native unit-test target.
+#include <cstddef>
+namespace _rns_native_compat {
+	struct SerialShim {
+		template<class... A> void print(A&&...)   {}
+		template<class... A> void println(A&&...) {}
+		template<class... A> void printf(A&&...)  {}
+		void flush() {}
+		void begin(int) {}
+	};
+	struct ESPShim {
+		size_t getFreeHeap()  const { return 0; }
+		size_t getFreePsram() const { return 0; }
+		size_t getPsramSize() const { return 0; }
+	};
+}
+inline _rns_native_compat::SerialShim Serial;
+inline _rns_native_compat::ESPShim    ESP;
+inline unsigned long millis() { return 0; }
+inline void delay(unsigned long) {}
+inline long random(long min, long max) { return min; }
+inline long random(long max) { return 0; }
 #endif
 
 #include <stdarg.h>
