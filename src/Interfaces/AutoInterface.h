@@ -39,7 +39,33 @@ namespace RNS {
 	 *   - One parent AutoInterface holds the multicast/unicast/data sockets.
 	 *   - One AutoInterfacePeer (registered with Transport) per peer.
 	 *   - Single-threaded, cooperative: loop() polls non-blocking sockets.
-	 *   - IFAC: not implemented in v1 (see plan).
+	 *
+	 * Limitations vs the Python reference:
+	 *   - Single-NIC only.  v1 does not enumerate system interfaces or take
+	 *     `devices` / `ignored_devices`; the host injects exactly one
+	 *     link-local address via set_link_local() / notify_link_change().
+	 *   - IFAC keying not implemented.  A Python AutoInterface configured
+	 *     with `ifac_netname` / `ifac_netkey` is not interoperable with this
+	 *     implementation.
+	 *   - The host must call notify_link_change() on Wi-Fi reassociation
+	 *     (or any event that rotates the link-local address or interface
+	 *     index).  Python's peer_jobs() polls for this every 4 s; the C++
+	 *     port is event-driven to keep the MCU loop hot path empty.
+	 *   - multicast_hops defaults to 1 for SCOPE_LINK and 32 for wider
+	 *     scopes.  Crossing routers also requires MLD/router config beyond
+	 *     setting IPV6_MULTICAST_HOPS — same caveat as Python.
+	 *
+	 * Host integration recipe:
+	 *   1. Resolve the link-local: WiFi.linkLocalIPv6().toString() (Arduino)
+	 *      or getifaddrs() (POSIX).
+	 *   2. Resolve the interface index: esp_netif_get_netif_impl_index(...)
+	 *      (Arduino) or if_nametoindex(...) (POSIX).
+	 *   3. Construct AutoInterface, set_link_local(addr, scope_id), start().
+	 *   4. Register the parent with Transport::register_interface() — the
+	 *      library only registers spawned per-peer wrappers, not the parent.
+	 *   5. Pump loop() from your main event loop (≤100 ms cadence).
+	 *   6. On Wi-Fi reassociation, call notify_link_change(new_addr,
+	 *      new_scope_id) — no need to stop()/start().
 	 */
 	class AutoInterface : public InterfaceImpl {
 	public:
@@ -70,13 +96,17 @@ namespace RNS {
 
 		using IPv6Addr = std::array<uint8_t, 16>;
 
+		// multicast_hops = 0 → auto: 1 for SCOPE_LINK, 32 otherwise.  Larger
+		// scopes (admin/site/org/global) also need router/MLD config to
+		// actually forward; this only sets the IPV6_MULTICAST_HOPS sockopt.
 		AutoInterface(const char* name = "AutoInterface",
 					  const char* group_id = DEFAULT_GROUP_ID,
 					  char addr_type = MCAST_ADDR_TYPE_TEMPORARY,
 					  char scope     = SCOPE_LINK,
 					  uint16_t discovery_port = DEFAULT_DISCOVERY_PORT,
 					  uint16_t data_port      = DEFAULT_DATA_PORT,
-					  uint8_t  max_peers      = RNS_AUTOIFACE_MAX_PEERS_DEFAULT);
+					  uint8_t  max_peers      = RNS_AUTOIFACE_MAX_PEERS_DEFAULT,
+					  uint8_t  multicast_hops = 0);
 		virtual ~AutoInterface();
 
 		// InterfaceImpl overrides
@@ -88,16 +118,29 @@ namespace RNS {
 		// Diagnostics / UI surface
 		size_t   peer_count()    const { return _peers.size(); }
 		bool     has_carrier()   const { return _has_mcast_echo; }
+		uint8_t  multicast_hops() const { return _multicast_hops; }
 		const std::string& multicast_address() const { return _mcast_addr_str; }
 		const std::string& link_local_address() const { return _link_local_addr; }
 		bool     has_peer(const IPv6Addr& addr) const;
 		uint64_t peer_last_heard_ms(const IPv6Addr& addr) const;
 
 		// Inject the local link-local address + interface scope id.
-		// Must be called before start().  Production code resolves these from
-		// WiFi.linkLocalIPv6() + esp_netif_get_netif_impl_index() (Arduino) or
-		// getifaddrs() + if_nametoindex() (native).
+		// Production code resolves these from WiFi.linkLocalIPv6() +
+		// esp_netif_get_netif_impl_index() (Arduino) or getifaddrs() +
+		// if_nametoindex() (native).  May be called any time — internally
+		// dispatches to notify_link_change().
 		void set_link_local(const std::string& addr_str, uint32_t scope_id);
+
+		// Notify the library that the host's link-local address and/or
+		// interface scope id has changed (e.g. Wi-Fi reassociation, DHCPv6
+		// PD reissue).  Recomputes the announce token so peers continue to
+		// validate us, rotates the previous link-local into the self-echo
+		// filter so late multicast loopback echoes don't accidentally peer
+		// us with our former self, and (if scope_id changed while online)
+		// leaves the old IPV6 multicast group and rejoins on the new
+		// interface index.  Idempotent: a no-op if (addr, scope) match
+		// the current values.  Safe to call before start().
+		void notify_link_change(const std::string& addr_str, uint32_t scope_id);
 
 		// Diagnostic FD accessors — returns -1 when closed.
 		int  discovery_socket_fd() const { return _disco_sock; }
@@ -109,6 +152,10 @@ namespace RNS {
 		void test_inject_peer(const IPv6Addr& addr, uint32_t scope_id, uint64_t now_ms);
 		void test_run_peer_jobs(uint64_t now_ms);
 		void test_loop_at(uint64_t now_ms);
+		size_t test_self_link_local_history_size() const {
+			return _self_link_local_history.size();
+		}
+		const Bytes& test_self_disco_token() const { return _self_disco_token; }
 
 		// Drive a single iteration with an injected clock.  Production code
 		// uses the no-arg loop() which calls this with OS::ltime().
@@ -157,6 +204,7 @@ namespace RNS {
 		uint16_t     _unicast_disco_port;
 		uint16_t     _data_port;
 		uint8_t      _max_peers;
+		uint8_t      _multicast_hops;
 		std::string  _mcast_addr_str;
 		IPv6Addr     _mcast_addr_bin{};
 
@@ -170,6 +218,12 @@ namespace RNS {
 		IPv6Addr     _self_link_local_bin{};
 		uint32_t     _scope_id        = 0;
 		Bytes        _self_disco_token;
+		// Recently rotated link-local addresses kept for self-echo
+		// suppression after notify_link_change().  Bounded at 4 — entries
+		// age out implicitly via the 22 s peer timeout if anything slips
+		// through.
+		std::deque<IPv6Addr> _self_link_local_history;
+		static constexpr size_t SELF_LL_HISTORY_MAX = 4;
 
 		// Peer table — keyed by 16-byte address (as std::string for cheap lookup)
 		struct PeerEntry {

@@ -47,13 +47,17 @@ namespace RNS {
 								 char scope,
 								 uint16_t discovery_port,
 								 uint16_t data_port,
-								 uint8_t max_peers)
+								 uint8_t max_peers,
+								 uint8_t multicast_hops)
 		: _addr_type(addr_type),
 		  _scope(scope),
 		  _discovery_port(discovery_port),
 		  _unicast_disco_port(discovery_port + 1),
 		  _data_port(data_port),
-		  _max_peers(max_peers)
+		  _max_peers(max_peers),
+		  _multicast_hops(multicast_hops != 0
+						  ? multicast_hops
+						  : (scope == SCOPE_LINK ? 1 : 32))
 	{
 		_name = name ? name : "AutoInterface";
 		_group_id_bytes = Bytes(group_id);
@@ -89,25 +93,86 @@ namespace RNS {
 	}
 
 	void AutoInterface::set_link_local(const std::string& addr_str, uint32_t scope_id) {
-		_scope_id = scope_id;
+		notify_link_change(addr_str, scope_id);
+	}
+
+	void AutoInterface::notify_link_change(const std::string& addr_str,
+										   uint32_t scope_id) {
 		// Re-canonicalize so the stored form is the lowercase RFC 5952 form
 		// regardless of whether the caller passed an expanded
 		// "fe80:0000:..." form (Arduino IPv6Address::toString) or
 		// uppercase from lwIP.  Peers compute their expected self-token by
 		// hashing what they read off recvfrom + inet_ntop, which on every
 		// other implementation is lowercase canonical.
-		struct in6_addr tmp;
-		if (inet_pton(AF_INET6, addr_str.c_str(), &tmp) == 1) {
-			std::memcpy(_self_link_local_bin.data(), &tmp, 16);
+		const std::string canon = canonicalize_ipv6(addr_str);
+		if (canon == _link_local_addr && scope_id == _scope_id) {
+			return;  // idempotent no-op
 		}
-		_link_local_addr = canonicalize_ipv6(addr_str);
+
+		struct in6_addr new_bin{};
+		if (inet_pton(AF_INET6, canon.c_str(), &new_bin) != 1) {
+			WARNINGF("AutoInterface::notify_link_change: invalid address '%s'",
+					 addr_str.c_str());
+			return;
+		}
+
+		// Remember the old link-local for self-echo suppression.  Late
+		// multicast loopbacks of our previous announces would otherwise
+		// pass token validation (their token was hashed from our prior
+		// address) and get added as a "peer" pointing back at us.
+		if (!_link_local_addr.empty()) {
+			_self_link_local_history.push_front(_self_link_local_bin);
+			while (_self_link_local_history.size() > SELF_LL_HISTORY_MAX) {
+				_self_link_local_history.pop_back();
+			}
+		}
+
+		std::memcpy(_self_link_local_bin.data(), &new_bin, 16);
+		_link_local_addr  = canon;
 		_self_disco_token = compute_discovery_token(_group_id_bytes, _link_local_addr);
+
+		const uint32_t prev_scope_id = _scope_id;
+		_scope_id = scope_id;
+
+		if (_online && _disco_sock >= 0 && prev_scope_id != scope_id) {
+			// Leave the old multicast membership on the previous ifindex
+			// and rejoin on the new one.  Both calls are best-effort:
+			// failure here is no worse than the start-time best-effort
+			// join (see open_sockets()), and we don't want a transient
+			// network blip to take the whole interface offline.
+			struct ipv6_mreq leave{};
+			std::memcpy(&leave.ipv6mr_multiaddr, _mcast_addr_bin.data(), 16);
+			leave.ipv6mr_interface = prev_scope_id;
+			::setsockopt(_disco_sock, IPPROTO_IPV6, IPV6_LEAVE_GROUP,
+						 &leave, sizeof(leave));
+
+			const unsigned int idx = static_cast<unsigned int>(scope_id);
+			::setsockopt(_disco_sock, IPPROTO_IPV6, IPV6_MULTICAST_IF,
+						 &idx, sizeof(idx));
+
+			struct ipv6_mreq join{};
+			std::memcpy(&join.ipv6mr_multiaddr, _mcast_addr_bin.data(), 16);
+			join.ipv6mr_interface = idx;
+			if (::setsockopt(_disco_sock, IPPROTO_IPV6, IPV6_JOIN_GROUP,
+							 &join, sizeof(join)) != 0) {
+				WARNINGF("AutoInterface::notify_link_change: rejoin on "
+						 "scope=%u failed (errno=%d)", (unsigned)scope_id, errno);
+			}
+		}
 	}
 
 	bool AutoInterface::start() {
 		if (_online) return true;
 		if (_link_local_addr.empty()) {
 			WARNING("AutoInterface::start: no link-local address configured");
+			return false;
+		}
+		if (_data_port == _unicast_disco_port || _data_port == _discovery_port) {
+			WARNINGF("AutoInterface::start: data_port (%u) collides with "
+					 "discovery_port (%u) or unicast_disco_port (%u); "
+					 "pick data_port at least 2 away from discovery_port",
+					 (unsigned)_data_port, (unsigned)_discovery_port,
+					 (unsigned)_unicast_disco_port);
 			return false;
 		}
 
@@ -360,7 +425,7 @@ namespace RNS {
 
 	bool AutoInterface::open_sockets() {
 		const int yes = 1;
-		const int hops = 1;
+		const int hops = static_cast<int>(_multicast_hops);
 		const unsigned int ifindex = static_cast<unsigned int>(_scope_id);
 
 		// --- Multicast discovery socket (RX + TX announces) ---
@@ -381,7 +446,8 @@ namespace RNS {
 		// IPV6_MULTICAST_LOOP: receive our own multicast frames so we can detect
 		// the multicast echo (matches Python AutoInterface lines 451-464).
 		::setsockopt(_disco_sock, IPPROTO_IPV6, IPV6_MULTICAST_LOOP, &yes, sizeof(yes));
-		// IPV6_MULTICAST_HOPS = 1 — link-local only, never leak.
+		// IPV6_MULTICAST_HOPS — defaults to 1 for SCOPE_LINK (never leaks)
+		// and 32 for wider scopes; user can override via the constructor.
 		::setsockopt(_disco_sock, IPPROTO_IPV6, IPV6_MULTICAST_HOPS, &hops, sizeof(hops));
 		if (!bind_any(_disco_sock, _discovery_port)) {
 			WARNING("AutoInterface: bind(disco) failed");
@@ -496,8 +562,21 @@ namespace RNS {
 			if (n <= 0) break;
 			if (!_final_init_done) continue;
 
-			// Self-echo: confirms multicast loopback works (carrier).
-			if (std::memcmp(&src.sin6_addr, _self_link_local_bin.data(), 16) == 0) {
+			// Self-echo: confirms multicast loopback works (carrier).  Also
+			// suppress echoes of our previously-rotated link-locals so a
+			// late loopback after notify_link_change() doesn't accidentally
+			// peer us with our former self.
+			bool self_echo = std::memcmp(&src.sin6_addr,
+										 _self_link_local_bin.data(), 16) == 0;
+			if (!self_echo) {
+				for (const auto& prev : _self_link_local_history) {
+					if (std::memcmp(&src.sin6_addr, prev.data(), 16) == 0) {
+						self_echo = true;
+						break;
+					}
+				}
+			}
+			if (self_echo) {
 				_last_mcast_echo_ms = static_cast<uint64_t>(Utilities::OS::ltime());
 				_has_mcast_echo     = true;
 				continue;

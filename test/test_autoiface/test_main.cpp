@@ -258,8 +258,10 @@ void test_peer_jobs_keeps_recent_peers() {
 // --- Socket lifecycle (native impl).  Uses ephemeral high ports to avoid
 // colliding with any system AutoInterface listener on the host.
 
+// Discovery and data must be ≥ 2 apart so the auto-derived
+// unicast_disco_port (= discovery + 1) doesn't collide with data.
 static const uint16_t kTestDiscoPort = 49716;
-static const uint16_t kTestDataPort  = 49717;
+static const uint16_t kTestDataPort  = 49720;
 
 void test_start_without_link_local_fails() {
 	AutoInterface ai("test_lifecycle", "reticulum",
@@ -272,6 +274,127 @@ void test_start_without_link_local_fails() {
 	TEST_ASSERT_EQUAL_INT(-1, ai.discovery_socket_fd());
 	TEST_ASSERT_EQUAL_INT(-1, ai.unicast_socket_fd());
 	TEST_ASSERT_EQUAL_INT(-1, ai.data_socket_fd());
+}
+
+void test_notify_link_change_recomputes_token() {
+	AutoInterface ai("nlc_token", "reticulum",
+		AutoInterface::MCAST_ADDR_TYPE_TEMPORARY,
+		AutoInterface::SCOPE_LINK,
+		29716, 42671, 4);
+
+	ai.set_link_local("fe80::abcd:1234", 1);
+	Bytes t1 = ai.test_self_disco_token();
+	TEST_ASSERT_EQUAL_size_t(32, t1.size());
+	TEST_ASSERT_EQUAL_STRING(kTokenReticulumFe80AbcdHex, t1.toHex().c_str());
+
+	ai.notify_link_change("fe80::1", 1);
+	Bytes t2 = ai.test_self_disco_token();
+	TEST_ASSERT_EQUAL_size_t(32, t2.size());
+	TEST_ASSERT_EQUAL_STRING(kTokenReticulumFe80OneHex, t2.toHex().c_str());
+	TEST_ASSERT_TRUE(t1 != t2);
+}
+
+void test_notify_link_change_remembers_old_for_self_echo() {
+	AutoInterface ai("nlc_history", "reticulum",
+		AutoInterface::MCAST_ADDR_TYPE_TEMPORARY,
+		AutoInterface::SCOPE_LINK,
+		29716, 42671, 4);
+
+	// First call: no prior address, history stays empty.
+	ai.set_link_local("fe80::abcd:1234", 1);
+	TEST_ASSERT_EQUAL_size_t(0, ai.test_self_link_local_history_size());
+
+	// Second call: prior address is rotated into history.
+	ai.notify_link_change("fe80::1", 1);
+	TEST_ASSERT_EQUAL_size_t(1, ai.test_self_link_local_history_size());
+
+	// Three more rotations — history caps at SELF_LL_HISTORY_MAX (4).
+	ai.notify_link_change("fe80::2", 1);
+	ai.notify_link_change("fe80::3", 1);
+	ai.notify_link_change("fe80::4", 1);
+	ai.notify_link_change("fe80::5", 1);
+	TEST_ASSERT_EQUAL_size_t(4, ai.test_self_link_local_history_size());
+}
+
+void test_notify_link_change_idempotent() {
+	AutoInterface ai("nlc_idem", "reticulum",
+		AutoInterface::MCAST_ADDR_TYPE_TEMPORARY,
+		AutoInterface::SCOPE_LINK,
+		29716, 42671, 4);
+
+	ai.set_link_local("fe80::abcd:1234", 1);
+	TEST_ASSERT_EQUAL_size_t(0, ai.test_self_link_local_history_size());
+
+	// Same args → no-op, history must not grow.
+	ai.notify_link_change("fe80::abcd:1234", 1);
+	TEST_ASSERT_EQUAL_size_t(0, ai.test_self_link_local_history_size());
+
+	// Different canonical form of the same address (uppercase) → still no-op.
+	ai.notify_link_change("FE80::ABCD:1234", 1);
+	TEST_ASSERT_EQUAL_size_t(0, ai.test_self_link_local_history_size());
+}
+
+void test_notify_link_change_rejects_invalid_address() {
+	AutoInterface ai("nlc_bad", "reticulum",
+		AutoInterface::MCAST_ADDR_TYPE_TEMPORARY,
+		AutoInterface::SCOPE_LINK,
+		29716, 42671, 4);
+
+	ai.set_link_local("fe80::1", 1);
+	Bytes before = ai.test_self_disco_token();
+
+	// Garbage input — must not mutate token or history.
+	ai.notify_link_change("not-an-address", 2);
+	TEST_ASSERT_TRUE(before == ai.test_self_disco_token());
+	TEST_ASSERT_EQUAL_size_t(0, ai.test_self_link_local_history_size());
+}
+
+void test_constructor_default_hops_link_scope() {
+	// SCOPE_LINK with hops=0 → auto-default 1 (link-local only).
+	AutoInterface ai("hops_link", "reticulum",
+		AutoInterface::MCAST_ADDR_TYPE_TEMPORARY,
+		AutoInterface::SCOPE_LINK,
+		29716, 42671, 4);
+	TEST_ASSERT_EQUAL_UINT8(1, ai.multicast_hops());
+}
+
+void test_constructor_default_hops_admin_scope() {
+	// SCOPE_ADMIN with hops=0 → auto-default 32 (cross-router-ready).
+	AutoInterface ai("hops_admin", "reticulum",
+		AutoInterface::MCAST_ADDR_TYPE_TEMPORARY,
+		AutoInterface::SCOPE_ADMIN,
+		29716, 42671, 4);
+	TEST_ASSERT_EQUAL_UINT8(32, ai.multicast_hops());
+}
+
+void test_constructor_explicit_hops_overrides_default() {
+	AutoInterface ai("hops_explicit", "reticulum",
+		AutoInterface::MCAST_ADDR_TYPE_TEMPORARY,
+		AutoInterface::SCOPE_LINK,
+		29716, 42671, 4, /*multicast_hops=*/16);
+	TEST_ASSERT_EQUAL_UINT8(16, ai.multicast_hops());
+}
+
+void test_start_rejects_colliding_data_port() {
+	// data_port == unicast_disco_port (= discovery_port + 1).  Without the
+	// guard, both sockets bind via SO_REUSEPORT and silently steal each
+	// other's packets.
+	AutoInterface ai_collide_unicast("test_collide_unicast", "reticulum",
+		AutoInterface::MCAST_ADDR_TYPE_TEMPORARY,
+		AutoInterface::SCOPE_LINK,
+		29716, 29717, 4);
+	ai_collide_unicast.set_link_local("fe80::1", 1);
+	TEST_ASSERT_FALSE(ai_collide_unicast.start());
+	TEST_ASSERT_EQUAL_INT(-1, ai_collide_unicast.discovery_socket_fd());
+
+	// data_port == discovery_port (the multicast socket itself).
+	AutoInterface ai_collide_disco("test_collide_disco", "reticulum",
+		AutoInterface::MCAST_ADDR_TYPE_TEMPORARY,
+		AutoInterface::SCOPE_LINK,
+		29716, 29716, 4);
+	ai_collide_disco.set_link_local("fe80::1", 1);
+	TEST_ASSERT_FALSE(ai_collide_disco.start());
+	TEST_ASSERT_EQUAL_INT(-1, ai_collide_disco.discovery_socket_fd());
 }
 
 void test_start_opens_three_sockets() {
@@ -438,7 +561,15 @@ int runUnityTests(void) {
 	RUN_TEST(test_add_peer_respects_max_peers_cap);
 	RUN_TEST(test_peer_jobs_evicts_timed_out_peers);
 	RUN_TEST(test_peer_jobs_keeps_recent_peers);
+	RUN_TEST(test_notify_link_change_recomputes_token);
+	RUN_TEST(test_notify_link_change_remembers_old_for_self_echo);
+	RUN_TEST(test_notify_link_change_idempotent);
+	RUN_TEST(test_notify_link_change_rejects_invalid_address);
+	RUN_TEST(test_constructor_default_hops_link_scope);
+	RUN_TEST(test_constructor_default_hops_admin_scope);
+	RUN_TEST(test_constructor_explicit_hops_overrides_default);
 	RUN_TEST(test_start_without_link_local_fails);
+	RUN_TEST(test_start_rejects_colliding_data_port);
 	RUN_TEST(test_start_opens_three_sockets);
 	RUN_TEST(test_stop_closes_sockets_and_clears_peers);
 	RUN_TEST(test_start_stop_start_is_idempotent);
